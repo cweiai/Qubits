@@ -1,15 +1,22 @@
 import "server-only";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { z } from "zod";
 import type { ServerToolDefinition } from "./types";
 import { ToolExecutionError } from "./types";
-import { z } from "zod";
 import { appSpecSchema, getAppSpecIssues } from "@/lib/contracts/app-spec";
 import { scanAppSpecForSecurityIssues } from "@/lib/app-spec/security";
+import {
+  safeReadFile,
+  safeResolveWorkspacePath,
+  safeWalkWorkspace,
+  withWorkspaceLock,
+} from "@/lib/workspace/paths";
 
 /**
  * Review/security tools (Reviewer-only, read-only): review_changes, security_review,
- * secret_scan, dependency_audit, check_data_isolation (see data.ts).
+ * secret_scan, dependency_audit, check_data_isolation (see data.ts). All workspace
+ * reads go through the unified jail: lstat-only walks (symlinks fail closed),
+ * O_NOFOLLOW reads, per-workspace mutex.
  */
 
 const SECRET_PATTERNS = [
@@ -21,42 +28,38 @@ const SECRET_PATTERNS = [
 
 const MAX_SCAN_FILE = 256 * 1024;
 
-function walkFiles(dir: string, out: string[] = []): string[] {
-  if (!existsSync(dir)) return out;
-  for (const name of readdirSync(dir)) {
-    const full = path.join(dir, name);
-    try {
-      const stat = statSync(full);
-      if (stat.isDirectory()) walkFiles(full, out);
-      else if (stat.isFile() && stat.size <= MAX_SCAN_FILE && !/\.(png|jpg|ico|woff2?|map)$/i.test(name)) out.push(full);
-    } catch {
-      // ignore
-    }
-  }
-  return out;
-}
-
 const issuesResultSchema = z.object({
   findings: z.array(z.object({ severity: z.enum(["error", "warning"]), file: z.string().max(200), message: z.string().max(300) })).max(50),
 });
 
 export const reviewChangesTool: ServerToolDefinition<{ path?: string }, { findings: Array<{ severity: "error" | "warning"; file: string; message: string }> }> = {
   name: "review_changes",
-  description: "审查 workspace 内变更（与最近检查点/初始状态对比的启发式检查）。",
+  description: "审查 workspace 内变更（与最近检查点/初始状态对比的启发式检查）。扫描根目录经过共享 jail（禁止绝对路径、.. 与符号链接）。",
   argsSchema: z.object({ path: z.string().max(300).default(".") }),
   resultSchema: issuesResultSchema,
   allowedRoles: ["reviewer", "security_reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
-    const findings: Array<{ severity: "error" | "warning"; file: string; message: string }> = [];
-    for (const file of walkFiles(path.resolve(context.workspaceDir, args.path ?? "."))) {
-      const content = readFileSync(file, "utf8");
-      if (/\beval\s*\(/.test(content)) findings.push({ severity: "error", file: path.relative(context.workspaceDir, file), message: "发现 eval() 调用" });
-      if (/new\s+Function/.test(content)) findings.push({ severity: "error", file: path.relative(context.workspaceDir, file), message: "发现 new Function" });
-      if (/child_process|execSync|shell:\s*true/.test(content)) findings.push({ severity: "warning", file: path.relative(context.workspaceDir, file), message: "发现子进程执行（请确认未使用 shell:true）" });
-    }
-    return { findings };
+    return withWorkspaceLock(context.workspaceDir, async () => {
+      // The scan root MUST go through the shared jail — path.resolve on raw input is forbidden.
+      const root = safeResolveWorkspacePath(context.workspaceDir, args.path ?? ".");
+      const isUnderRoot = (abs: string): boolean => {
+        const rel = path.relative(root.resolved, abs);
+        return !rel.startsWith("..") && !path.isAbsolute(rel);
+      };
+      const files = safeWalkWorkspace(context.workspaceDir).filter(
+        (entry) => entry.type === "file" && isUnderRoot(entry.abs)
+      );
+      const findings: Array<{ severity: "error" | "warning"; file: string; message: string }> = [];
+      for (const file of files) {
+        const { content } = safeReadFile(context.workspaceDir, file.path, MAX_SCAN_FILE);
+        if (/\beval\s*\(/.test(content)) findings.push({ severity: "error", file: file.path, message: "发现 eval() 调用" });
+        if (/new\s+Function/.test(content)) findings.push({ severity: "error", file: file.path, message: "发现 new Function" });
+        if (/child_process|execSync|shell:\s*true/.test(content)) findings.push({ severity: "warning", file: file.path, message: "发现子进程执行（请确认未使用 shell:true）" });
+      }
+      return { findings };
+    });
   },
 };
 
@@ -100,16 +103,20 @@ export const secretScanTool: ServerToolDefinition<Record<string, never>, { findi
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
-    const findings: Array<{ severity: "error" | "warning"; file: string; message: string }> = [];
-    for (const file of walkFiles(context.workspaceDir)) {
-      const content = readFileSync(file, "utf8");
-      for (const rule of SECRET_PATTERNS) {
-        if (rule.pattern.test(content)) {
-          findings.push({ severity: "error", file: path.relative(context.workspaceDir, file), message: "疑似 " + rule.name });
+    return withWorkspaceLock(context.workspaceDir, async () => {
+      const findings: Array<{ severity: "error" | "warning"; file: string; message: string }> = [];
+      // lstat-only walk: symlinks/special files fail closed inside safeWalkWorkspace.
+      for (const file of safeWalkWorkspace(context.workspaceDir)) {
+        if (file.type !== "file") continue;
+        const { content } = safeReadFile(context.workspaceDir, file.path, MAX_SCAN_FILE);
+        for (const rule of SECRET_PATTERNS) {
+          if (rule.pattern.test(content)) {
+            findings.push({ severity: "error", file: file.path, message: "疑似 " + rule.name });
+          }
         }
       }
-    }
-    return { findings };
+      return { findings };
+    });
   },
 };
 
@@ -122,18 +129,25 @@ export const dependencyAuditTool: ServerToolDefinition<Record<string, never>, { 
   risk: "medium",
   requiresApproval: false,
   async execute(_args, context) {
-    const packageJsonPath = path.join(context.workspaceDir, "package.json");
-    if (!existsSync(packageJsonPath)) return { findings: [] };
-    const findings: Array<{ severity: "error" | "warning"; file: string; message: string }> = [];
-    try {
-      const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
-      const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
-      for (const [name, version] of Object.entries(deps)) {
-        if (/\*|latest|>|<|\^0\.0\./.test(version)) findings.push({ severity: "warning", file: "package.json", message: "依赖 " + name + " 使用了过宽版本范围：" + version });
+    return withWorkspaceLock(context.workspaceDir, async () => {
+      const findings: Array<{ severity: "error" | "warning"; file: string; message: string }> = [];
+      // package.json read through the shared jail (O_NOFOLLOW, symlink-free path).
+      let content: string;
+      try {
+        content = safeReadFile(context.workspaceDir, "package.json", MAX_SCAN_FILE).content;
+      } catch {
+        return { findings: [] }; // missing package.json is not a finding
       }
-    } catch {
-      findings.push({ severity: "warning", file: "package.json", message: "package.json 无法解析" });
-    }
-    return { findings };
+      try {
+        const pkg = JSON.parse(content) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+        const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+        for (const [name, version] of Object.entries(deps)) {
+          if (/\*|latest|>|<|\^0\.0\./.test(version)) findings.push({ severity: "warning", file: "package.json", message: "依赖 " + name + " 使用了过宽版本范围：" + version });
+        }
+      } catch {
+        findings.push({ severity: "warning", file: "package.json", message: "package.json 无法解析" });
+      }
+      return { findings };
+    });
   },
 };

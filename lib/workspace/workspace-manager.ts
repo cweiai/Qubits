@@ -1,10 +1,18 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, writeSync } from "node:fs";
 import path from "node:path";
 import { MANIFEST_FILE_NAME, parseManifestText, type QubitsManifest } from "@/lib/contracts/manifest";
 import { WorkspaceError } from "./errors";
-import { isSystemOwnedPath, resolveWorkspacePath, SYSTEM_OWNED_PATTERNS } from "./paths";
+import {
+  clearWorkspaceBlock,
+  isSystemOwnedPath,
+  readFileNofollow,
+  safeResolveWorkspacePath,
+  safeWalkWorkspace,
+  safeWriteFile,
+  SYSTEM_OWNED_PATTERNS,
+} from "./paths";
 
 /**
  * Workspace manager: the code workspace under data/workspaces/<taskId> is the single
@@ -13,7 +21,9 @@ import { isSystemOwnedPath, resolveWorkspacePath, SYSTEM_OWNED_PATTERNS } from "
  * - initWorkspace is idempotent: an existing workspace (marker file) is never re-seeded;
  * - new tasks seed from the project's last successful code snapshot, first generations
  *   from the trusted template;
- * - retries reuse the same workspace and never delete existing files.
+ * - retries reuse the same workspace and never delete existing files;
+ * - every walk is lstatSync-based through safeWalkWorkspace: symlinks/special files
+ *   mark the workspace SECURITY_BLOCKED and every access fails closed.
  */
 
 export const WORKSPACE_MARKER = ".qubits-workspace.json";
@@ -38,10 +48,12 @@ export function hashText(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+/** Hash an already-validated absolute path without following a symlinked final component. */
 export function hashFile(absPath: string): string {
-  return createHash("sha256").update(readFileSync(absPath)).digest("hex");
+  return createHash("sha256").update(readFileNofollow(absPath)).digest("hex");
 }
 
+/** Copy a trusted tree (template/snapshot); never follows symlinks, rejects special files. */
 function copyTree(fromDir: string, toDir: string): void {
   mkdirSync(toDir, { recursive: true });
   for (const name of readdirSync(fromDir)) {
@@ -49,6 +61,10 @@ function copyTree(fromDir: string, toDir: string): void {
     const from = path.join(fromDir, name);
     const to = path.join(toDir, name);
     const stat = lstatSync(from);
+    if (stat.isSymbolicLink()) continue; // never copy symlink content outside
+    if (stat.isSocket() || stat.isFIFO() || stat.isBlockDevice() || stat.isCharacterDevice()) {
+      throw new WorkspaceError("SECURITY_BLOCKED", "模板/快照包含特殊文件：" + name, false);
+    }
     if (stat.isDirectory()) {
       copyTree(from, to);
     } else if (stat.isFile()) {
@@ -62,7 +78,7 @@ function readMarker(workspaceDir: string): WorkspaceInfo | null {
   const markerPath = path.join(workspaceDir, WORKSPACE_MARKER);
   if (!existsSync(markerPath)) return null;
   try {
-    const parsed = JSON.parse(readFileSync(markerPath, "utf8")) as Partial<WorkspaceInfo>;
+    const parsed = JSON.parse(readFileNofollow(markerPath).toString("utf8")) as Partial<WorkspaceInfo>;
     if (typeof parsed?.taskId === "string" && typeof parsed?.createdAt === "number") {
       return {
         taskId: parsed.taskId,
@@ -82,6 +98,7 @@ export function initWorkspace(workspaceDir: string, input: { taskId: string; sou
   mkdirSync(workspaceDir, { recursive: true });
   const existing = readMarker(workspaceDir);
   if (existing) {
+    // A restored/seeded workspace is trusted; a blocked one stays blocked.
     return { ...existing, seededFrom: "existing" };
   }
   if (input.sourceDir && existsSync(input.sourceDir)) {
@@ -97,8 +114,22 @@ export function initWorkspace(workspaceDir: string, input: { taskId: string; sou
     createdAt: Date.now(),
     seededFrom: input.sourceDir && existsSync(input.sourceDir) ? "snapshot" : "template",
   };
-  writeFileSync(path.join(workspaceDir, WORKSPACE_MARKER), JSON.stringify(info, null, 2));
+  writeFileNofollowMarker(workspaceDir, info);
+  clearWorkspaceBlock(workspaceDir);
   return info;
+}
+
+function writeFileNofollowMarker(workspaceDir: string, info: WorkspaceInfo): void {
+  const markerPath = path.join(workspaceDir, WORKSPACE_MARKER);
+  const nofollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  const fd = openSync(markerPath, (constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC) | nofollow, 0o644);
+  try {
+    const buffer = Buffer.from(JSON.stringify(info, null, 2), "utf8");
+    let offset = 0;
+    while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function getWorkspaceInfo(workspaceDir: string): WorkspaceInfo | null {
@@ -114,11 +145,11 @@ export function requireWorkspace(workspaceDir: string): WorkspaceInfo {
 
 export function readWorkspaceManifest(workspaceDir: string): QubitsManifest {
   requireWorkspace(workspaceDir);
-  const manifestPath = resolveWorkspacePath(workspaceDir, MANIFEST_FILE_NAME);
-  if (!existsSync(manifestPath)) {
+  const { resolved } = safeResolveWorkspacePath(workspaceDir, MANIFEST_FILE_NAME);
+  if (!existsSync(resolved)) {
     throw new WorkspaceError("INVALID_MANIFEST", "qubits.manifest.json 缺失", false);
   }
-  const parsed = parseManifestText(readFileSync(manifestPath, "utf8"));
+  const parsed = parseManifestText(readFileNofollow(resolved).toString("utf8"));
   if (!parsed.ok) {
     throw new WorkspaceError("INVALID_MANIFEST", "manifest 校验失败：" + parsed.issues.slice(0, 4).join("；"), false);
   }
@@ -128,54 +159,28 @@ export function readWorkspaceManifest(workspaceDir: string): QubitsManifest {
 /** System-only manifest write (used by dependency tools after allowlist validation). */
 export function writeWorkspaceManifest(workspaceDir: string, manifest: QubitsManifest): void {
   requireWorkspace(workspaceDir);
-  const manifestPath = resolveWorkspacePath(workspaceDir, MANIFEST_FILE_NAME);
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  safeWriteFile(workspaceDir, MANIFEST_FILE_NAME, JSON.stringify(manifest, null, 2) + "\n");
 }
 
 export function listWorkspaceFiles(workspaceDir: string, maxEntries = 200): FileEntry[] {
   requireWorkspace(workspaceDir);
-  const entries: FileEntry[] = [];
-  const walk = (current: string, rel: string, depth: number): void => {
-    if (entries.length >= maxEntries || depth > 8) return;
-    for (const name of readdirSync(current).slice(0, maxEntries - entries.length)) {
-      if (name === "node_modules" || name === ".qubits-trash") continue;
-      const full = path.join(current, name);
-      const relPath = rel ? rel + "/" + name : name;
-      try {
-        const stat = lstatSync(full);
-        const systemOwned = isSystemOwnedPath(relPath);
-        entries.push({ path: relPath, type: stat.isDirectory() ? "dir" : "file", size: stat.isFile() ? stat.size : 0, systemOwned });
-        if (stat.isDirectory()) walk(full, relPath, depth + 1);
-      } catch {
-        // unreadable entries are skipped
-      }
-    }
-  };
-  walk(workspaceDir, "", 1);
-  return entries;
+  // lstat-only walk; symlinks/special files fail closed (SECURITY_BLOCKED).
+  const entries = safeWalkWorkspace(workspaceDir).slice(0, maxEntries);
+  return entries.map((entry) => ({
+    path: entry.path,
+    type: entry.type,
+    size: entry.size,
+    systemOwned: isSystemOwnedPath(entry.path),
+  }));
 }
 
 /** Files that participate in build/hash/snapshot (exclude dist + internal dirs). */
 export function listSourceFiles(workspaceDir: string): Array<{ path: string; abs: string }> {
   requireWorkspace(workspaceDir);
-  const out: Array<{ path: string; abs: string }> = [];
-  const walk = (current: string, rel: string, depth: number): void => {
-    if (depth > 8) return;
-    for (const name of readdirSync(current)) {
-      if (SKIP_COPY.has(name)) continue;
-      const full = path.join(current, name);
-      const relPath = rel ? rel + "/" + name : name;
-      try {
-        const stat = lstatSync(full);
-        if (stat.isDirectory()) walk(full, relPath, depth + 1);
-        else if (stat.isFile()) out.push({ path: relPath, abs: full });
-      } catch {
-        // skip unreadable
-      }
-    }
-  };
-  walk(workspaceDir, "", 1);
-  return out.sort((a, b) => a.path.localeCompare(b.path));
+  return safeWalkWorkspace(workspaceDir)
+    .filter((entry) => entry.type === "file" && !entry.path.startsWith("dist/"))
+    .map((entry) => ({ path: entry.path, abs: entry.abs }))
+    .sort((a, b) => a.path.localeCompare(b.path));
 }
 
 export function workspaceFileManifest(workspaceDir: string): Array<{ path: string; hash: string; size: number }> {

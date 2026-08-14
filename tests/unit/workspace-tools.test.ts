@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { executeTool } from "@/lib/ai/tools/registry";
 import { ArtifactStore } from "@/lib/ai/artifact-store";
-import { LocalDevSandboxProvider } from "@/lib/ai/tools/sandbox-provider";
 import type { ToolExecutionContext } from "@/lib/ai/tools/types";
+import { FakeSandboxProvider } from "./fakes";
 import { initWorkspace } from "@/lib/workspace/workspace-manager";
 import { createCodeSnapshot } from "@/lib/workspace/snapshot";
 
@@ -42,7 +42,7 @@ function makeContext(role: ToolExecutionContext["roleId"] = "engineer"): ToolExe
     previewCommitted: false,
     workspaceDir: wsDir,
     workspaceReady: false,
-    sandbox: new LocalDevSandboxProvider(),
+    sandbox: new FakeSandboxProvider(),
     approvedTools: new Set<string>(),
     counters: { toolCalls: 0, childAgents: 0 },
   };
@@ -123,12 +123,12 @@ describe("dependency 工具", () => {
 });
 
 describe("initWorkspace 与快照种子", () => {
-  it("新任务从快照种子创建（在既有项目上修改应用）", () => {
+  it("新任务从快照种子创建（在既有项目上修改应用）", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "qubits-seed-"));
     try {
       initWorkspace(dir, { taskId: "task-a" });
       writeFileSync(path.join(dir, "src", "App.tsx"), "export function App() { return null; }\n");
-      const snap = createCodeSnapshot("prj-seed-00000001", dir);
+      const snap = await createCodeSnapshot("prj-seed-00000001", dir);
       const dir2 = mkdtempSync(path.join(tmpdir(), "qubits-seed2-"));
       const info = initWorkspace(dir2, { taskId: "task-b", sourceDir: snap.dir });
       expect(info.seededFrom).toBe("snapshot");

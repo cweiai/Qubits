@@ -3,13 +3,20 @@ import { build as esbuildBuild, type Plugin } from "esbuild";
 import autoprefixer from "autoprefixer";
 import postcss from "postcss";
 import tailwindcss from "tailwindcss";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { MANIFEST_FILE_NAME, MANIFEST_MAIN } from "@/lib/contracts/manifest";
 import { WorkspaceError, redactHostText } from "./errors";
 import { checkWorkspaceDependencies } from "./dependency-policy";
 import { scanWorkspace } from "./security-scan";
 import { readWorkspaceManifest, requireWorkspace, workspaceFileManifest } from "./workspace-manager";
+import {
+  assertWorkspaceTreeSafe,
+  readFileNofollow,
+  safeResolveWorkspacePath,
+  withWorkspaceLock,
+  writeFileNofollow,
+} from "./paths";
 
 /**
  * Server-controlled builder. The generated code never controls the Vite/esbuild
@@ -93,30 +100,52 @@ function makeCssCollector(): { plugin: Plugin; cssFiles: string[] } {
 }
 
 export async function buildApp(workspaceDir: string): Promise<BuildAppResult> {
+  return withWorkspaceLock(workspaceDir, () => buildAppLocked(workspaceDir));
+}
+
+async function buildAppLocked(workspaceDir: string): Promise<BuildAppResult> {
   const startedAt = Date.now();
   requireWorkspace(workspaceDir);
-  const manifest = readWorkspaceManifest(workspaceDir);
   const distDir = path.join(workspaceDir, "dist");
   const log: string[] = [];
+  let manifest: ReturnType<typeof readWorkspaceManifest> | null = null;
 
   const fail = (code: string, message: string): BuildAppResult => {
     log.push("error_code: " + code + " | " + redactHostText(message, workspaceDir).slice(0, 300));
+    let files: Array<{ path: string; hash: string; size: number }> = [];
+    try {
+      // The block reason may already be set (fail closed): never let the file
+      // manifest re-trigger the blocked check and mask the original error.
+      files = workspaceFileManifest(workspaceDir);
+    } catch {
+      files = [];
+    }
     const report: BuildReport = {
       status: "failed",
       errorCode: code,
       message: redactHostText(message, workspaceDir).slice(0, 500),
       log: logLines(log),
       entry: MANIFEST_MAIN,
-      files: workspaceFileManifest(workspaceDir),
-      deps: manifest.dependencies.map((dep) => dep.name + "@" + dep.version),
+      files,
+      deps: (manifest?.dependencies ?? []).map((dep) => dep.name + "@" + dep.version),
       outputBytes: 0,
       durationMs: Date.now() - startedAt,
       builtAt: Date.now(),
     };
     mkdirSync(distDir, { recursive: true });
-    writeFileSync(path.join(distDir, BUILD_REPORT_NAME), JSON.stringify(report, null, 2));
+    writeFileNofollow(path.join(distDir, BUILD_REPORT_NAME), JSON.stringify(report, null, 2));
     return { report, bundle: null };
   };
+
+  try {
+    // Fail closed before bundling: symlinks/special files anywhere (incl. dist) block the build.
+    assertWorkspaceTreeSafe(workspaceDir);
+    manifest = readWorkspaceManifest(workspaceDir);
+  } catch (error) {
+    if (error instanceof WorkspaceError) return fail(error.code, error.message);
+    throw error;
+  }
+  if (!manifest) return fail("INVALID_MANIFEST", "manifest 缺失");
 
   try {
     // 1) Deterministic static scan (blocked → SECURITY_BLOCKED before anything runs).
@@ -139,9 +168,10 @@ export async function buildApp(workspaceDir: string): Promise<BuildAppResult> {
     log.push("dependency_check: pass");
 
     // 3) esbuild bundle (system config; generated code cannot override it).
-    const entryAbs = path.join(workspaceDir, MANIFEST_MAIN);
-    if (!existsSync(entryAbs)) {
-      return fail("BUILD_FAILED", "构建入口缺失：" + MANIFEST_MAIN);
+    const entry = safeResolveWorkspacePath(workspaceDir, MANIFEST_MAIN);
+    const entryAbs = entry.resolved;
+    if (!existsSync(entryAbs) || !lstatSync(entryAbs).isFile()) {
+      return fail("BUILD_FAILED", "构建入口缺失或不是普通文件：" + MANIFEST_MAIN);
     }
     const { plugin, cssFiles } = makeCssCollector();
     let bundle: { outputFiles: Array<{ text: string }> };
@@ -180,7 +210,7 @@ export async function buildApp(workspaceDir: string): Promise<BuildAppResult> {
       const cssInput = cssFiles
         .map((file) => {
           try {
-            return readFileSync(file, "utf8");
+            return readFileNofollow(file).toString("utf8");
           } catch {
             return "";
           }
@@ -226,9 +256,9 @@ export async function buildApp(workspaceDir: string): Promise<BuildAppResult> {
     }
 
     mkdirSync(distDir, { recursive: true });
-    writeFileSync(path.join(distDir, PREVIEW_HTML_NAME), html);
-    writeFileSync(path.join(distDir, PREVIEW_JS_NAME), js);
-    if (css) writeFileSync(path.join(distDir, PREVIEW_CSS_NAME), css);
+    writeFileNofollow(path.join(distDir, PREVIEW_HTML_NAME), html);
+    writeFileNofollow(path.join(distDir, PREVIEW_JS_NAME), js);
+    if (css) writeFileNofollow(path.join(distDir, PREVIEW_CSS_NAME), css);
     log.push("preview_bundle: " + bytes + " bytes");
 
     const report: BuildReport = {
@@ -243,7 +273,7 @@ export async function buildApp(workspaceDir: string): Promise<BuildAppResult> {
       durationMs: Date.now() - startedAt,
       builtAt: Date.now(),
     };
-    writeFileSync(path.join(distDir, BUILD_REPORT_NAME), JSON.stringify(report, null, 2));
+    writeFileNofollow(path.join(distDir, BUILD_REPORT_NAME), JSON.stringify(report, null, 2));
     return { report, bundle: { html, bytes, builtAt: report.builtAt } };
   } catch (error) {
     if (error instanceof WorkspaceError) {
@@ -254,22 +284,28 @@ export async function buildApp(workspaceDir: string): Promise<BuildAppResult> {
   }
 }
 
-/** Read the last persisted build report from a workspace's dist directory. */
+/**
+ * Read the last persisted build report from a workspace's dist directory.
+ * Synchronous on purpose: the run-route emit callback cannot await. Every path is
+ * still jail-verified (symlink walk + O_NOFOLLOW), so a symlinked report can never
+ * redirect the read outside the workspace.
+ */
 export function readBuildReport(workspaceDir: string): BuildReport | null {
-  const reportPath = path.join(workspaceDir, "dist", BUILD_REPORT_NAME);
-  if (!existsSync(reportPath)) return null;
   try {
-    return JSON.parse(readFileSync(reportPath, "utf8")) as BuildReport;
+    const { resolved } = safeResolveWorkspacePath(workspaceDir, "dist/" + BUILD_REPORT_NAME);
+    if (!existsSync(resolved)) return null;
+    return JSON.parse(readFileNofollow(resolved).toString("utf8")) as BuildReport;
   } catch {
     return null;
   }
 }
 
+/** Read the last preview bundle from a workspace's dist directory (jail-verified, sync). */
 export function readPreviewBundle(workspaceDir: string): PreviewBundle | null {
-  const htmlPath = path.join(workspaceDir, "dist", PREVIEW_HTML_NAME);
-  if (!existsSync(htmlPath)) return null;
   try {
-    const html = readFileSync(htmlPath, "utf8");
+    const { resolved } = safeResolveWorkspacePath(workspaceDir, "dist/" + PREVIEW_HTML_NAME);
+    if (!existsSync(resolved)) return null;
+    const html = readFileNofollow(resolved).toString("utf8");
     return { html, bytes: Buffer.byteLength(html), builtAt: 0 };
   } catch {
     return null;

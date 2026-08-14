@@ -161,7 +161,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
     let toolEvents: unknown[] = isRetry ? parseJsonArray(task.toolEventsJson) : [];
 
     const promoteRun = async (input: PromoteRunInput): Promise<{ snapshotId: string; version: number }> => {
-      const snapshot = createCodeSnapshot(projectId, input.workspaceDir);
+      const snapshot = await createCodeSnapshot(projectId, input.workspaceDir);
       const fresh = repo.getConversation(task.conversationId);
       const version = fresh?.previewVersion ?? (currentVersion + 1);
       repo.createCodeSnapshot({

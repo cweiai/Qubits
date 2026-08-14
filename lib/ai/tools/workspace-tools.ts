@@ -1,8 +1,6 @@
 import "server-only";
 import { z } from "zod";
 import { transform as esbuildTransform } from "esbuild";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
 import { getManifestIssues } from "@/lib/contracts/manifest";
 import type { ServerToolDefinition, ToolExecutionContext } from "./types";
 import {
@@ -40,6 +38,7 @@ import { DEPENDENCY_ALLOWLIST, assertDependencyAvailable, getDependencyVersion }
 import { scanWorkspace } from "@/lib/workspace/security-scan";
 import { createCodeSnapshot as createSnapshot, restoreCodeSnapshot as restoreSnapshot } from "@/lib/workspace/snapshot";
 import { WorkspaceError, redactHostText } from "@/lib/workspace/errors";
+import { assertWorkspaceTreeSafe, safeReadFile, safeWriteFile, withWorkspaceLock } from "@/lib/workspace/paths";
 
 /**
  * Workspace tools: the only way AI creates/modifies real application code.
@@ -218,7 +217,7 @@ export const createCodeSnapshotTool: ServerToolDefinition<z.infer<typeof createC
   requiresApproval: false,
   async execute(_args, context) {
     const workspaceDir = requireInitializedWorkspace(context);
-    const snapshot = createSnapshot(context.currentAppId || "project", workspaceDir);
+    const snapshot = await createSnapshot(context.currentAppId || "project", workspaceDir);
     const artifactId = context.artifacts.put({
       kind: "code_workspace",
       createdBy: context.roleId,
@@ -239,7 +238,7 @@ export const restoreCodeSnapshotTool: ServerToolDefinition<z.infer<typeof restor
   requiresApproval: false,
   async execute(args, context) {
     const workspaceDir = requireInitializedWorkspace(context);
-    const restored = restoreSnapshot(args.snapshotId, context.currentAppId || "project", workspaceDir);
+    const restored = await restoreSnapshot(args.snapshotId, context.currentAppId || "project", workspaceDir);
     return { restored, snapshotId: args.snapshotId };
   },
 };
@@ -255,26 +254,26 @@ export const runFormatTool: ServerToolDefinition<z.infer<typeof runFormatArgsSch
   requiresApproval: false,
   async execute(_args, context) {
     const workspaceDir = requireInitializedWorkspace(context);
-    const files = workspaceFileManifest(workspaceDir).filter((file) => /\.(ts|tsx)$/.test(file.path) && !file.path.endsWith(".test.ts") && file.path !== "src/lib/qubits.ts");
-    let formatted = 0;
-    let changed = 0;
-    for (const file of files) {
-      const abs = path.join(workspaceDir, file.path);
-      if (!existsSync(abs)) continue;
-      const before = readFileSync(abs, "utf8");
-      try {
-        const result = await esbuildTransform(before, { loader: file.path.endsWith(".tsx") ? "tsx" : "ts", format: "esm", target: "es2020", jsx: "automatic", logLevel: "silent" });
-        formatted += 1;
-        if (result.code !== before) {
-          mkdirSync(path.dirname(abs), { recursive: true });
-          writeFileSync(abs, result.code);
-          changed += 1;
+    return withWorkspaceLock(workspaceDir, async () => {
+      assertWorkspaceTreeSafe(workspaceDir);
+      const files = workspaceFileManifest(workspaceDir).filter((file) => /\.(ts|tsx)$/.test(file.path) && !file.path.endsWith(".test.ts") && file.path !== "src/lib/qubits.ts");
+      let formatted = 0;
+      let changed = 0;
+      for (const file of files) {
+        const { content: before } = safeReadFile(workspaceDir, file.path, 256 * 1024);
+        try {
+          const result = await esbuildTransform(before, { loader: file.path.endsWith(".tsx") ? "tsx" : "ts", format: "esm", target: "es2020", jsx: "automatic", logLevel: "silent" });
+          formatted += 1;
+          if (result.code !== before) {
+            safeWriteFile(workspaceDir, file.path, result.code);
+            changed += 1;
+          }
+        } catch (error) {
+          throw new WorkspaceError("FORMAT_FAILED", "格式化失败：" + redactHostText(error instanceof Error ? error.message : "未知错误", workspaceDir).slice(0, 300), false);
         }
-      } catch (error) {
-        throw new WorkspaceError("FORMAT_FAILED", "格式化失败：" + redactHostText(error instanceof Error ? error.message : "未知错误", workspaceDir).slice(0, 300), false);
       }
-    }
-    return { formatted, changed, summary: "已检查 " + formatted + " 个文件，改写 " + changed + " 个。" };
+      return { formatted, changed, summary: "已检查 " + formatted + " 个文件，改写 " + changed + " 个。" };
+    });
   },
 };
 

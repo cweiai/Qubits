@@ -23,7 +23,7 @@ import type { StoredArtifactEntry } from "@/lib/ai/artifact-store";
 beforeAll(() => {
   process.env.QUIBITS_MOCK_PROVIDER = "true";
   process.env.REFERENCE_SEARCH_PROVIDER = "mock";
-  process.env.SANDBOX_PROVIDER = "local-dev";
+  delete process.env.SANDBOX_PROVIDER; // container-only; the orchestrator builds the real provider
 });
 
 /** Workspace under the repo so type resolution reaches the host node_modules (real checks run). */

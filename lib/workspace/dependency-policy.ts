@@ -1,9 +1,10 @@
 import "server-only";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import type { QubitsManifest } from "@/lib/contracts/manifest";
 import { WorkspaceError } from "./errors";
 import { listSourceFiles } from "./workspace-manager";
+import { readFileNofollow } from "./paths";
 
 /**
  * Server-controlled dependency allowlist: dependency_add can only pick packages from
@@ -51,7 +52,7 @@ export function collectImportSpecifiers(workspaceDir: string): string[] {
     if (!/\.(ts|tsx|js|jsx)$/.test(file.path)) continue;
     const content = (() => {
       try {
-        return readFileSync(file.abs, "utf8");
+        return readFileNofollow(file.abs).toString("utf8");
       } catch {
         return "";
       }

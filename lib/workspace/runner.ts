@@ -3,12 +3,15 @@ import path from "node:path";
 import type { SandboxProvider } from "@/lib/ai/tools/sandbox-provider";
 import { WorkspaceError, redactHostText, type WorkspaceErrorCode } from "./errors";
 import { requireWorkspace } from "./workspace-manager";
+import { assertWorkspaceTreeSafe, withWorkspaceLock } from "./paths";
 
 /**
- * Workspace check runner: lint / typecheck / tests execute through the SandboxProvider
- * (spawn with shell:false, allowlisted commands, timeouts and output caps) using
- * SYSTEM-maintained configs and host-installed tools. Generated code cannot change
- * these configs (protected paths) or run package scripts (none exist).
+ * Workspace check runner: lint / typecheck / tests execute ONLY inside the Docker
+ * ContainerSandbox. The system toolchain (typescript/eslint/vitest and the
+ * system-maintained configs) is mounted read-only at /usr/tools; generated code can
+ * never change these configs (protected paths) or run package scripts (none exist).
+ * Runs serialize with agent file operations via the per-workspace mutex, and the tree
+ * is re-scanned for symlinks/special files after every container execution.
  */
 
 export interface CheckResult {
@@ -20,13 +23,26 @@ export interface CheckResult {
 }
 
 const HOST = process.cwd();
-// "node" must stay on the provider command allowlist (full binary paths are rejected).
 const NODE = "node";
-const TSC_BIN = path.join(HOST, "node_modules", "typescript", "bin", "tsc");
-const ESLINT_BIN = path.join(HOST, "node_modules", "eslint", "bin", "eslint.js");
-const VITEST_BIN = path.join(HOST, "node_modules", "vitest", "vitest.mjs");
-const ESLINT_CONFIG = path.join(HOST, "lib", "workspace", "system-configs", "app-eslint.config.mjs");
-const VITEST_CONFIG = path.join(HOST, "lib", "workspace", "system-configs", "app-vitest.config.mjs");
+// Toolchain layout inside the container:
+// - qubits-toolchain image provides /qubits-tools/node_modules (linux-native binaries:
+//   vitest/vite/rollup/esbuild), so vitest runs in the container.
+// - host node_modules is mounted read-only at /workspace/node_modules so tsc/eslint
+//   and the generated code resolve types/modules (pure-JS parts only).
+// - host system-configs is mounted read-only at /qubits-tools/configs; config imports
+//   resolve by walking up to /qubits-tools/node_modules.
+const TSC_BIN = "/workspace/node_modules/typescript/bin/tsc";
+const ESLINT_BIN = "/workspace/node_modules/eslint/bin/eslint.js";
+const VITEST_BIN = "/qubits-tools/node_modules/vitest/vitest.mjs";
+const ESLINT_CONFIG = "/qubits-tools/configs/app-eslint.config.mjs";
+const VITEST_CONFIG = "/qubits-tools/configs/app-vitest.config.mjs";
+// Workspace mount point inside the container.
+const WORKSPACE_IN_CONTAINER = "/workspace";
+
+const TOOLCHAIN_MOUNTS = [
+  { hostPath: path.join(HOST, "node_modules"), containerPath: "/workspace/node_modules" },
+  { hostPath: path.join(HOST, "lib", "workspace", "system-configs"), containerPath: "/qubits-tools/configs" },
+];
 
 const CHECK_TIMEOUT_MS = 180_000;
 
@@ -43,24 +59,36 @@ async function runCheck(input: {
   if (!sandbox) {
     throw new WorkspaceError("PROVIDER_UNAVAILABLE", "未配置沙盒 provider，无法执行" + label, false);
   }
-  const result = await sandbox.exec({
-    command,
-    args,
-    cwd: workspaceDir,
-    timeoutMs: CHECK_TIMEOUT_MS,
-    // ESLint 8 only validates flat-config-only flags (--no-config-lookup) when flat mode is active;
-    // the workspace has no eslint.config, so force flat mode explicitly.
-    extraEnv: { ESLINT_USE_FLAT_CONFIG: "true" },
+  return withWorkspaceLock(workspaceDir, async () => {
+    // Fail closed before running if the tree already contains symlinks/special files.
+    assertWorkspaceTreeSafe(workspaceDir);
+    const result = await sandbox.exec({
+      command,
+      args,
+      cwd: workspaceDir,
+      timeoutMs: CHECK_TIMEOUT_MS,
+      extraEnv: { ESLINT_USE_FLAT_CONFIG: "true" },
+      extraMounts: TOOLCHAIN_MOUNTS,
+    });
+    // Fail closed after running: a check could have planted symlinks via test code.
+    try {
+      assertWorkspaceTreeSafe(workspaceDir);
+    } catch (error) {
+      if (error instanceof WorkspaceError && error.code === "SECURITY_BLOCKED") throw error;
+    }
+    const log = redactHostText(
+      [result.stdout.slice(-2400), result.stderr.slice(-1200)].filter(Boolean).join("\n"),
+      workspaceDir
+    );
+    const status = result.timedOut ? "timeout" : result.exitCode === 0 ? "passed" : "failed";
+    const summary =
+      label + "：" + (status === "passed" ? "通过" : status === "timeout" ? "超时" : "失败（exitCode=" + result.exitCode + "）") +
+      (log ? "\n" + log.slice(-1200) : "");
+    if (status === "failed") {
+      throw new WorkspaceError(errorCode, summary.slice(0, 400), true);
+    }
+    return { status, exitCode: result.exitCode, summary: summary.slice(0, 2000), log, durationMs: result.durationMs };
   });
-  const log = redactHostText([result.stdout.slice(-2400), result.stderr.slice(-1200)].filter(Boolean).join("\n"), workspaceDir);
-  const status = result.timedOut ? "timeout" : result.exitCode === 0 ? "passed" : "failed";
-  const summary =
-    label + "：" + (status === "passed" ? "通过" : status === "timeout" ? "超时" : "失败（exitCode=" + result.exitCode + "）") +
-    (log ? "\n" + log.slice(-1200) : "");
-  if (status === "failed") {
-    throw new WorkspaceError(errorCode, summary.slice(0, 400), true);
-  }
-  return { status, exitCode: result.exitCode, summary: summary.slice(0, 2000), log, durationMs: result.durationMs };
 }
 
 export async function runWorkspaceTypecheck(sandbox: SandboxProvider | null, workspaceDir: string): Promise<CheckResult> {
@@ -90,7 +118,7 @@ export async function runWorkspaceTests(sandbox: SandboxProvider | null, workspa
     sandbox,
     workspaceDir,
     command: NODE,
-    args: [VITEST_BIN, "run", "--root", workspaceDir, "--config", VITEST_CONFIG],
+    args: [VITEST_BIN, "run", "--root", WORKSPACE_IN_CONTAINER, "--config", VITEST_CONFIG],
     label: "单元测试",
     errorCode: "TEST_FAILED",
   });

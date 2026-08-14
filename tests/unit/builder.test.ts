@@ -5,9 +5,10 @@ import { initWorkspace, listSourceFiles } from "@/lib/workspace/workspace-manage
 import { buildApp } from "@/lib/workspace/builder";
 import { scanWorkspace } from "@/lib/workspace/security-scan";
 import { checkWorkspaceDependencies } from "@/lib/workspace/dependency-policy";
-import { resolveWorkspacePath } from "@/lib/workspace/paths";
+import { safeResolveWorkspacePath } from "@/lib/workspace/paths";
 import { runWorkspaceLint, runWorkspaceTests, runWorkspaceTypecheck } from "@/lib/workspace/runner";
-import { LocalDevSandboxProvider } from "@/lib/ai/tools/sandbox-provider";
+import { ContainerSandboxProvider } from "@/lib/ai/tools/sandbox-provider";
+import { dockerAvailable } from "./fakes";
 
 /**
  * Real build pipeline tests: the trusted template must pass lint/typecheck/tests/build
@@ -45,10 +46,10 @@ describe("可信模板构建流水线", () => {
     expect(listSourceFiles(dir).some((f) => f.path === "qubits.manifest.json")).toBe(true);
   });
 
-  it("模板通过 lint、typecheck、tests、build，并产生真实 preview bundle", async () => {
+  it.skipIf(!dockerAvailable())("模板通过 lint、typecheck、tests、build（真实 Docker 容器内执行），并产生真实 preview bundle", async () => {
     const dir = makeWorkspace();
     initWorkspace(dir, { taskId: "task-000000000002" });
-    const sandbox = new LocalDevSandboxProvider();
+    const sandbox = new ContainerSandboxProvider();
 
     const typecheck = await runWorkspaceTypecheck(sandbox, dir);
     expect(typecheck.status).toBe("passed");
@@ -68,7 +69,7 @@ describe("可信模板构建流水线", () => {
     // Real artifacts on disk.
     expect(readFileSync(path.join(dir, "dist", "index.html"), "utf8")).toContain("qubits-root");
     expect(JSON.parse(readFileSync(path.join(dir, "dist", "build-report.json"), "utf8")).status).toBe("success");
-  }, 180000);
+  }, 300000);
 
   it("静态扫描阻断 eval / fetch / localStorage（SECURITY_BLOCKED）", async () => {
     const dir = makeWorkspace();
@@ -117,12 +118,12 @@ describe("路径 jail", () => {
   it("拒绝绝对路径、../ 与敏感文件", () => {
     const dir = makeWorkspace();
     initWorkspace(dir, { taskId: "task-000000000006" });
-    expect(() => resolveWorkspacePath(dir, "/etc/passwd")).toThrowError(/绝对路径/);
-    expect(() => resolveWorkspacePath(dir, "../outside.txt")).toThrowError(/工作区外|路径/);
-    expect(() => resolveWorkspacePath(dir, ".env")).toThrowError(/敏感文件/);
+    expect(() => safeResolveWorkspacePath(dir, "/etc/passwd")).toThrowError(/绝对路径/);
+    expect(() => safeResolveWorkspacePath(dir, "../outside.txt")).toThrowError(/拒绝|路径/);
+    expect(() => safeResolveWorkspacePath(dir, ".env")).toThrowError(/敏感文件/);
   });
 });
 
 beforeAll(() => {
-  process.env.SANDBOX_PROVIDER = "local-dev";
+  delete process.env.SANDBOX_PROVIDER; // container is the only provider
 });

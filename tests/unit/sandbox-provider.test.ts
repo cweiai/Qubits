@@ -1,68 +1,43 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ContainerSandboxProvider,
-  LocalDevSandboxProvider,
   getSandboxProvider,
   describeSandboxProvider,
 } from "@/lib/ai/tools/sandbox-provider";
+import { dockerAvailable } from "./fakes";
 
 /**
- * SandboxProvider boundary tests: LocalDevSandbox is explicitly NOT a production
- * security boundary; ContainerSandbox fails closed when Docker is unavailable and
- * never falls back to host execution.
+ * SandboxProvider boundary tests: the ONLY provider is the Docker container
+ * (physical isolation, fail closed). There is no local provider, no demo provider
+ * and no host-execution fallback. Real-Docker tests run only when a daemon is up.
  */
 
 const ORIGINAL_PATH = process.env.PATH;
+const ORIGINAL_PROVIDER = process.env.SANDBOX_PROVIDER;
 
 afterEach(() => {
-  delete process.env.SANDBOX_PROVIDER;
+  if (ORIGINAL_PROVIDER === undefined) delete process.env.SANDBOX_PROVIDER;
+  else process.env.SANDBOX_PROVIDER = ORIGINAL_PROVIDER;
   process.env.PATH = ORIGINAL_PATH;
 });
 
-describe("LocalDevSandboxProvider", () => {
-  it("明确标记：不是生产安全边界", () => {
-    const provider = new LocalDevSandboxProvider();
-    expect(provider.kind).toBe("local-dev");
-    expect(provider.isProductionSecurityBoundary).toBe(false);
-    expect(provider.securityBoundaryNote).toContain("不是生产安全边界");
+describe("ContainerSandboxProvider（唯一 provider，fail closed）", () => {
+  it("明确标记：生产隔离边界", () => {
+    const provider = new ContainerSandboxProvider();
+    expect(provider.kind).toBe("container");
+    expect(provider.isProductionSecurityBoundary).toBe(true);
+    expect(provider.securityBoundaryNote).toContain("容器");
     const info = describeSandboxProvider(provider);
-    expect(info.available).toBe(true);
-    expect(info.note).toContain("不是生产安全边界");
+    expect(info.provider).toBe("container");
   });
 
-  it("spawn 无 shell:true，命令 allowlist 生效", async () => {
-    const provider = new LocalDevSandboxProvider();
-    const denied = await provider.exec({
-      command: "rm",
-      args: ["-rf", "/"],
-      cwd: process.cwd(),
-      timeoutMs: 3000,
-    });
-    expect(denied.exitCode).toBe(126);
-    expect(denied.stderr).toContain("allowlist");
-  });
-
-  it("敏感环境变量被剥离", async () => {
-    process.env.OPENAI_API_KEY = "sk-should-not-leak";
-    process.env.DATABASE_URL = "file:./secret.db";
-    const provider = new LocalDevSandboxProvider();
-    const result = await provider.exec({
-      command: "node",
-      args: ["-e", "console.log(process.env.OPENAI_API_KEY || 'EMPTY'); console.log(process.env.DATABASE_URL || 'EMPTY')"],
-      cwd: process.cwd(),
-      timeoutMs: 5000,
-    });
-    expect(result.stdout).toContain("EMPTY");
-  });
-});
-
-describe("ContainerSandboxProvider（生产接口，fail closed）", () => {
-  it("Docker 不可用时 fail closed：exec 返回 PROVIDER_UNAVAILABLE，绝不回退宿主执行", async () => {
+  it("Docker 不可用时 fail closed：exec 返回 PROVIDER_UNAVAILABLE，绝不执行宿主命令", async () => {
     // Make docker unreachable deterministically (PATH without docker).
     process.env.PATH = "/nonexistent";
     const provider = new ContainerSandboxProvider();
-    expect(provider.isProductionSecurityBoundary).toBe(true);
-    expect(provider.securityBoundaryNote).toContain("容器");
+    expect(provider.isAvailable()).toBe(false);
+    const info = describeSandboxProvider(provider);
+    expect(info.available).toBe(false);
     const result = await provider.exec({
       command: "node",
       args: ["-e", "console.log('should never run')"],
@@ -71,7 +46,6 @@ describe("ContainerSandboxProvider（生产接口，fail closed）", () => {
     });
     expect(result.exitCode).toBe(125);
     expect(result.stderr).toContain("PROVIDER_UNAVAILABLE");
-    expect(result.stderr).toContain("fail closed");
     expect(result.stdout).not.toContain("should never run");
   });
 
@@ -80,21 +54,69 @@ describe("ContainerSandboxProvider（生产接口，fail closed）", () => {
     const provider = new ContainerSandboxProvider();
     await expect(provider.create(process.cwd())).rejects.toThrowError(/PROVIDER_UNAVAILABLE|容器沙盒不可用/);
   });
+
+  it("exec 校验 command/args/cwd：非法输入被拒绝且不启动容器", async () => {
+    const provider = new ContainerSandboxProvider();
+    // command 不在 allowlist
+    const denied = await provider.exec({ command: "rm", args: ["-rf", "/"], cwd: process.cwd(), timeoutMs: 3000 });
+    expect(denied.exitCode).toBe(126);
+    expect(denied.stderr).toContain("allowlist");
+    // command 带路径
+    const pathCommand = await provider.exec({ command: "/bin/bash", args: [], cwd: process.cwd(), timeoutMs: 3000 });
+    expect(pathCommand.exitCode).toBe(126);
+    // cwd 不存在
+    const badCwd = await provider.exec({ command: "bash", args: ["-lc", "true"], cwd: "/nonexistent-cwd-qubits", timeoutMs: 3000 });
+    expect(badCwd.exitCode).toBe(126);
+    expect(badCwd.stderr).toContain("cwd");
+    // args 含 NUL
+    const badArgs = await provider.exec({ command: "bash", args: ["-lc", "true\0bad"], cwd: process.cwd(), timeoutMs: 3000 });
+    expect(badArgs.exitCode).toBe(126);
+  });
 });
 
-describe("getSandboxProvider", () => {
-  it("默认 container（物理隔离）；local-dev 仅显式指定；未知值不静默回退", () => {
+describe("getSandboxProvider（永远 container）", () => {
+  it("默认与显式 container 都返回容器 provider；任何其他值拒绝启动", () => {
     delete process.env.SANDBOX_PROVIDER;
-    expect(getSandboxProvider()?.kind).toBe("container");
+    expect(getSandboxProvider().kind).toBe("container");
     process.env.SANDBOX_PROVIDER = "container";
-    expect(getSandboxProvider()?.kind).toBe("container");
-    process.env.SANDBOX_PROVIDER = "local-dev";
-    expect(getSandboxProvider()?.kind).toBe("local-dev");
-    process.env.SANDBOX_PROVIDER = "local-demo"; // legacy value → dev sandbox
-    expect(getSandboxProvider()?.kind).toBe("local-dev");
-    process.env.SANDBOX_PROVIDER = "unknown-provider";
-    expect(getSandboxProvider()).toBeNull();
-    process.env.SANDBOX_PROVIDER = "none";
-    expect(getSandboxProvider()).toBeNull();
+    expect(getSandboxProvider().kind).toBe("container");
+    for (const bad of ["local-dev", "local-demo", "none", "unknown-provider"]) {
+      process.env.SANDBOX_PROVIDER = bad;
+      expect(() => getSandboxProvider()).toThrowError(/只允许 container/);
+    }
   });
+});
+
+describe("真实 Docker 集成（需要 Docker daemon）", () => {
+  const enabled = dockerAvailable();
+  it.skipIf(!enabled)("describeSandboxProvider 与真实 Docker 状态一致", () => {
+    const provider = new ContainerSandboxProvider();
+    const info = describeSandboxProvider(provider);
+    expect(info.available).toBe(true);
+    expect(provider.isAvailable()).toBe(true);
+  });
+
+  it.skipIf(!enabled)("容器物理隔离：workspace 可见，宿主文件不可见，且可写 workspace", async () => {
+    const { mkdirSync, rmSync, writeFileSync, readFileSync } = await import("node:fs");
+    const { homedir } = await import("node:os");
+    const path = await import("node:path");
+    const ws = path.join(homedir(), ".qubits-sandbox-test-" + Date.now());
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(path.join(ws, "marker.txt"), "hello-workspace");
+    try {
+      const provider = new ContainerSandboxProvider();
+      const result = await provider.exec({
+        command: "bash",
+        args: ["-lc", "cat marker.txt; echo ---; ls /Users 2>&1 | head -1; echo hi > new.txt"],
+        cwd: ws,
+        timeoutMs: 60000,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("hello-workspace");
+      expect(result.stdout).toContain("No such file");
+      expect(readFileSync(path.join(ws, "new.txt"), "utf8")).toBe("hi\n");
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  }, 90000);
 });

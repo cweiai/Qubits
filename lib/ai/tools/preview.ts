@@ -11,6 +11,7 @@ import {
 import { SearchProviderError } from "./search-provider";
 import { readWorkspaceManifest } from "@/lib/workspace/workspace-manager";
 import { WorkspaceError } from "@/lib/workspace/errors";
+import { assertWorkspaceTreeSafe, withWorkspaceLock } from "@/lib/workspace/paths";
 
 /**
  * render_preview: the only preview submission entry point. It can ONLY accept a
@@ -50,9 +51,12 @@ export const renderPreviewTool: ServerToolDefinition<z.infer<typeof renderPrevie
     }
     let manifest;
     try {
-      manifest = readWorkspaceManifest(context.workspaceDir);
+      manifest = await withWorkspaceLock(context.workspaceDir, async () => {
+        assertWorkspaceTreeSafe(context.workspaceDir);
+        return readWorkspaceManifest(context.workspaceDir);
+      });
     } catch {
-      throw new SearchProviderError("PREVIEW_FAILED", "工作区 manifest 校验失败，不能提交预览");
+      throw new SearchProviderError("PREVIEW_FAILED", "工作区校验失败（manifest 或安全扫描），不能提交预览");
     }
     const version = context.currentVersion + 1;
     context.previewCommitted = true;
@@ -102,7 +106,10 @@ export const completeRunTool: ServerToolDefinition<z.infer<typeof completeRunArg
       throw new SearchProviderError("PREVIEW_REQUIRED", "必须先成功调用 render_preview");
     }
     if (context.promoteRun) {
-      const manifest = readWorkspaceManifest(context.workspaceDir);
+      const manifest = await withWorkspaceLock(context.workspaceDir, async () => {
+        assertWorkspaceTreeSafe(context.workspaceDir);
+        return readWorkspaceManifest(context.workspaceDir);
+      });
       const testReport = context.artifacts.findLatest("test_report");
       const reviewReport = context.artifacts.findLatest("review_report");
       const preview = context.artifacts.findLatest("preview_bundle");

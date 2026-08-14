@@ -1,6 +1,6 @@
 import "server-only";
-import { existsSync, readFileSync } from "node:fs";
 import { listSourceFiles } from "./workspace-manager";
+import { readFileNofollow } from "./paths";
 
 /**
  * Deterministic static scan over the generated code. It blocks at least:
@@ -57,10 +57,9 @@ export function scanWorkspace(workspaceDir: string): SecurityScanReport {
     (file) => !TRUSTED_TEMPLATE_FILES.has(file.path) && CODE_EXTENSIONS.some((ext) => file.path.endsWith(ext))
   );
   for (const file of files) {
-    if (!existsSync(file.abs)) continue;
     let content = "";
     try {
-      content = readFileSync(file.abs, "utf8");
+      content = readFileNofollow(file.abs).toString("utf8");
     } catch {
       continue;
     }

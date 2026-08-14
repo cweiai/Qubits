@@ -9,7 +9,7 @@ export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: false,
   workers: 1,
-  timeout: 60_000,
+  timeout: 180_000,
   expect: { timeout: 30_000 },
   reporter: [["list"]],
   use: {
@@ -26,9 +26,9 @@ export default defineConfig({
       DATABASE_URL: "file:./data/e2e.db",
       QUIBITS_MOCK_PROVIDER: "true",
       REFERENCE_SEARCH_PROVIDER: "mock",
-      // e2e runs without Docker: explicitly opt into the dev-only provider
-      // (default is container, which fails closed when Docker is absent).
-      SANDBOX_PROVIDER: "local-dev",
+      // Sandbox: container-only (the default). e2e requires a running Docker daemon
+      // because real build checks run inside the container — no local fallback.
+      SANDBOX_PROVIDER: "container",
     },
   },
   projects: [
