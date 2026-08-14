@@ -13,12 +13,12 @@ async function generateApp(page: Page, prompt: string, mode: "desktop" | "mobile
   await page.getByTestId("prompt-input").fill(prompt);
   await page.getByTestId("prompt-send").click();
   if (mode === "desktop") {
-    await expect(page.locator(FRAME)).toBeVisible({ timeout: 120_000 });
-    await expect(page.frameLocator(FRAME).getByTestId("template-app")).toBeVisible({ timeout: 120_000 });
+    await expect(page.locator(FRAME)).toBeVisible({ timeout: 180_000 });
+    await expect(page.frameLocator(FRAME).getByTestId("template-app")).toBeVisible({ timeout: 180_000 });
   } else {
     // On mobile the initial tab is chat; wait only for attachment, not visibility.
-    await expect(page.locator(FRAME)).toBeAttached({ timeout: 120_000 });
-    await expect(page.frameLocator(FRAME).getByTestId("template-app")).toBeAttached({ timeout: 120_000 });
+    await expect(page.locator(FRAME)).toBeAttached({ timeout: 180_000 });
+    await expect(page.frameLocator(FRAME).getByTestId("template-app")).toBeAttached({ timeout: 180_000 });
   }
 }
 

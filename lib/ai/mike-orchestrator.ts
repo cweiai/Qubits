@@ -90,7 +90,7 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
   } : undefined);
   const counters = { toolCalls: 0, childAgents: 0 };
   const workspaceDir = input.workspaceDir ?? path.join(process.cwd(), "data", "workspaces", runId);
-  // The route seeds the workspace (snapshot or template) before the run starts;
+  // The route seeds the workspace (snapshot or system skeleton) before the run starts;
   // workspace_init remains idempotent and Alex may still call it.
   const runState = {
     reviewerApproved: false,

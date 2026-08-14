@@ -19,21 +19,24 @@ import {
  * source of truth for the generated app.
  *
  * - initWorkspace is idempotent: an existing workspace (marker file) is never re-seeded;
- * - new tasks seed from the project's last successful code snapshot, first generations
- *   from the trusted template;
+ * - a NEW workspace starts with ONLY the system skeleton (package.json / tsconfig.json /
+ *   the SDK bridge src/lib/qubits.ts — all system-owned). There is no example-app
+ *   template: the agent writes qubits.manifest.json, src/main.tsx and every other file
+ *   itself. New tasks on an existing project seed from the project's last successful
+ *   code snapshot instead;
  * - retries reuse the same workspace and never delete existing files;
  * - every walk is lstatSync-based through safeWalkWorkspace: symlinks/special files
  *   mark the workspace SECURITY_BLOCKED and every access fails closed.
  */
 
 export const WORKSPACE_MARKER = ".qubits-workspace.json";
-const TEMPLATE_DIR = path.join(process.cwd(), "lib", "workspace", "template");
+const SKELETON_DIR = path.join(process.cwd(), "lib", "workspace", "system-skeleton");
 const SKIP_COPY = new Set(["node_modules", "dist", ".qubits-trash"]);
 
 export interface WorkspaceInfo {
   taskId: string;
   createdAt: number;
-  seededFrom: "template" | "snapshot" | "existing";
+  seededFrom: "skeleton" | "snapshot" | "existing";
   template?: string;
 }
 
@@ -53,7 +56,7 @@ export function hashFile(absPath: string): string {
   return createHash("sha256").update(readFileNofollow(absPath)).digest("hex");
 }
 
-/** Copy a trusted tree (template/snapshot); never follows symlinks, rejects special files. */
+/** Copy a trusted tree (skeleton/snapshot); never follows symlinks, rejects special files. */
 function copyTree(fromDir: string, toDir: string): void {
   mkdirSync(toDir, { recursive: true });
   for (const name of readdirSync(fromDir)) {
@@ -63,7 +66,7 @@ function copyTree(fromDir: string, toDir: string): void {
     const stat = lstatSync(from);
     if (stat.isSymbolicLink()) continue; // never copy symlink content outside
     if (stat.isSocket() || stat.isFIFO() || stat.isBlockDevice() || stat.isCharacterDevice()) {
-      throw new WorkspaceError("SECURITY_BLOCKED", "模板/快照包含特殊文件：" + name, false);
+      throw new WorkspaceError("SECURITY_BLOCKED", "骨架/快照包含特殊文件：" + name, false);
     }
     if (stat.isDirectory()) {
       copyTree(from, to);
@@ -83,7 +86,8 @@ function readMarker(workspaceDir: string): WorkspaceInfo | null {
       return {
         taskId: parsed.taskId,
         createdAt: parsed.createdAt,
-        seededFrom: (parsed.seededFrom as WorkspaceInfo["seededFrom"]) ?? "existing",
+        // Legacy markers may still say "template"; treat them as skeleton-seeded.
+        seededFrom: (String(parsed.seededFrom) === "template" ? "skeleton" : (parsed.seededFrom as WorkspaceInfo["seededFrom"])) ?? "existing",
         template: typeof parsed.template === "string" ? parsed.template : undefined,
       };
     }
@@ -93,7 +97,7 @@ function readMarker(workspaceDir: string): WorkspaceInfo | null {
   return null;
 }
 
-/** Idempotent workspace initialization. sourceDir (a snapshot) wins over the template. */
+/** Idempotent workspace initialization: skeleton (or snapshot) only, never an example app. */
 export function initWorkspace(workspaceDir: string, input: { taskId: string; sourceDir?: string | null }): WorkspaceInfo {
   mkdirSync(workspaceDir, { recursive: true });
   const existing = readMarker(workspaceDir);
@@ -104,15 +108,15 @@ export function initWorkspace(workspaceDir: string, input: { taskId: string; sou
   if (input.sourceDir && existsSync(input.sourceDir)) {
     copyTree(input.sourceDir, workspaceDir);
   } else {
-    if (!existsSync(TEMPLATE_DIR)) {
-      throw new WorkspaceError("WORKSPACE_ERROR", "可信模板缺失，无法初始化工作区", false);
+    if (!existsSync(SKELETON_DIR)) {
+      throw new WorkspaceError("WORKSPACE_ERROR", "系统骨架缺失，无法初始化工作区", false);
     }
-    copyTree(TEMPLATE_DIR, workspaceDir);
+    copyTree(SKELETON_DIR, workspaceDir);
   }
   const info: WorkspaceInfo = {
     taskId: input.taskId,
     createdAt: Date.now(),
-    seededFrom: input.sourceDir && existsSync(input.sourceDir) ? "snapshot" : "template",
+    seededFrom: input.sourceDir && existsSync(input.sourceDir) ? "snapshot" : "skeleton",
   };
   writeFileNofollowMarker(workspaceDir, info);
   clearWorkspaceBlock(workspaceDir);

@@ -169,7 +169,7 @@ export const publishResultSchema = z.object({ available: z.literal(false), provi
 export const workspaceInitArgsSchema = z.object({}).strict();
 export const workspaceInitResultSchema = z.object({
   initialized: z.boolean(),
-  seededFrom: z.enum(["template", "snapshot", "existing"]),
+  seededFrom: z.enum(["skeleton", "snapshot", "existing"]),
   fileCount: z.number().int(),
 });
 export const workspaceGetManifestArgsSchema = z.object({}).strict();

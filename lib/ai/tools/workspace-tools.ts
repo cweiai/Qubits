@@ -56,7 +56,7 @@ function requireInitializedWorkspace(context: ToolExecutionContext): string {
 
 export const workspaceInitTool: ServerToolDefinition<z.infer<typeof workspaceInitArgsSchema>, z.infer<typeof workspaceInitResultSchema>> = {
   name: "workspace_init",
-  description: "幂等地初始化当前任务的代码工作区：根目录 + 可信模板（任务重试时保留已有文件，绝不删除）。",
+  description: "幂等地初始化当前任务的代码工作区：只写入系统骨架文件（package.json/tsconfig.json/SDK bridge，均为系统维护，AI 不可写），不含示例应用模板——qubits.manifest.json、src/main.tsx 与其余代码需自行创建。任务重试时保留已有文件，绝不删除。",
   argsSchema: workspaceInitArgsSchema,
   resultSchema: workspaceInitResultSchema,
   allowedRoles: ["engineer"],

@@ -36,6 +36,11 @@ describe("代码快照", () => {
   it("create → 不可变目录 + 文件哈希清单；restore 恢复文件", async () => {
     const ws = makeWorkspace();
     initWorkspace(ws, { taskId: "task-snap-00000001" });
+    // No template seeds the manifest anymore: the agent writes it before snapshotting.
+    writeFileSync(
+      path.join(ws, "qubits.manifest.json"),
+      JSON.stringify({ schemaVersion: 1, name: "快照应用", description: "x", main: "src/main.tsx", collections: [], dependencies: [] })
+    );
     writeFileSync(path.join(ws, "src", "custom.tsx"), "export const marker = 1;\n");
 
     const snapshot = await createCodeSnapshot(projectId, ws);

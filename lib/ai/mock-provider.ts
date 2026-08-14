@@ -377,11 +377,42 @@ const MOCK_STYLES_CSS = `body {
 }
 `;
 
+// No template is seeded anymore: the engineer writes the entry point and a real
+// test file itself, exactly like a real agent run.
+const MOCK_MAIN_TSX = `import { createRoot } from "react-dom/client";
+// Side-effect import: starts the Qubits SDK bridge handshake (system-owned file).
+import "./lib/qubits";
+import { App } from "./App";
+import "./styles.css";
+
+function ensureRoot(): HTMLElement {
+  const existing = document.getElementById("qubits-root");
+  if (existing) return existing;
+  const el = document.createElement("div");
+  el.id = "qubits-root";
+  document.body.appendChild(el);
+  return el;
+}
+
+createRoot(ensureRoot()).render(<App />);
+`;
+
+const MOCK_APP_TEST_TS = `import { describe, expect, it } from "vitest";
+
+describe("mock app logic", () => {
+  it("basic sanity", () => {
+    expect(1 + 1).toBe(2);
+  });
+});
+`;
+
 const ENGINEER_SEQUENCE: Array<{ name: string; args: Record<string, unknown> }> = [
   { name: "workspace_init", args: {} },
   { name: "fs_write", args: { path: "qubits.manifest.json", content: MOCK_MANIFEST_JSON } },
+  { name: "fs_write", args: { path: "src/main.tsx", content: MOCK_MAIN_TSX } },
   { name: "fs_write", args: { path: "src/App.tsx", content: MOCK_APP_TSX } },
   { name: "fs_write", args: { path: "src/styles.css", content: MOCK_STYLES_CSS } },
+  { name: "fs_write", args: { path: "src/app.test.ts", content: MOCK_APP_TEST_TS } },
   { name: "run_typecheck", args: { timeoutMs: 180000 } },
   { name: "run_tests", args: { timeoutMs: 180000 } },
   { name: "run_build", args: {} },

@@ -13,8 +13,8 @@ const FRAME = 'iframe[data-testid="sandbox-iframe"]';
 async function generateApp(page: Page, prompt: string): Promise<void> {
   await page.getByTestId("prompt-input").fill(prompt);
   await page.getByTestId("prompt-send").click();
-  await expect(page.locator(FRAME)).toBeVisible({ timeout: 120_000 });
-  await expect(page.frameLocator(FRAME).getByTestId("template-app")).toBeVisible({ timeout: 120_000 });
+  await expect(page.locator(FRAME)).toBeVisible({ timeout: 180_000 });
+  await expect(page.frameLocator(FRAME).getByTestId("template-app")).toBeVisible({ timeout: 180_000 });
 }
 
 /** Evaluate a script inside the sandbox iframe (isolation assertions). */
@@ -219,7 +219,7 @@ test("构建失败保留上一个成功版本（错误清晰可重试）", async
   // Inject an illegal dependency → build fails → task fails; preview stays v1.
   await page.getByTestId("prompt-input").fill("修改应用【注入非法依赖】");
   await page.getByTestId("prompt-send").click();
-  await expect(page.getByTestId("error-message").first()).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByTestId("error-message").first()).toBeVisible({ timeout: 180_000 });
 
   // The iframe still shows the last successful version with its data.
   await expect(page.frameLocator(FRAME).getByTestId("stat-total")).toHaveText("1");

@@ -11,9 +11,10 @@ import { ContainerSandboxProvider } from "@/lib/ai/tools/sandbox-provider";
 import { dockerAvailable } from "./fakes";
 
 /**
- * Real build pipeline tests: the trusted template must pass lint/typecheck/tests/build
- * and produce a real preview bundle; security/dependency violations must block.
- * The workspace lives under the repo so type resolution reaches the host node_modules.
+ * Real build pipeline tests: a workspace starts with ONLY the system skeleton
+ * (package.json / tsconfig.json / src/lib/qubits.ts — no example-app template), the
+ * agent-side fixture writes the app itself, and lint/typecheck/tests/build run inside
+ * the Docker container against the mounted toolchain.
  */
 
 const workspaces: string[] = [];
@@ -22,6 +23,42 @@ function makeWorkspace(): string {
   mkdirSync(dir, { recursive: true });
   workspaces.push(dir);
   return dir;
+}
+
+/** Minimal valid manifest fixture (the agent normally writes this via fs_write). */
+function writeFixtureManifest(dir: string): void {
+  const manifest = {
+    schemaVersion: 1,
+    name: "Fixture 应用",
+    description: "builder 测试 fixture 应用",
+    main: "src/main.tsx",
+    collections: [
+      {
+        name: "notes",
+        label: "笔记",
+        fields: [{ name: "title", label: "标题", type: "text", required: true, maxLength: 100 }],
+        allowedOperations: ["list", "count", "create", "update", "delete"],
+      },
+    ],
+    dependencies: [],
+  };
+  writeFileSync(path.join(dir, "qubits.manifest.json"), JSON.stringify(manifest, null, 2));
+}
+
+/** Minimal app fixture: entry point + component + real test (the agent writes these). */
+function writeFixtureApp(dir: string): void {
+  writeFileSync(
+    path.join(dir, "src", "main.tsx"),
+    'import { createRoot } from "react-dom/client";\nimport "./lib/qubits";\nimport { App } from "./App";\n\nfunction ensureRoot(): HTMLElement {\n  const existing = document.getElementById("qubits-root");\n  if (existing) return existing;\n  const el = document.createElement("div");\n  el.id = "qubits-root";\n  document.body.appendChild(el);\n  return el;\n}\n\ncreateRoot(ensureRoot()).render(<App />);\n'
+  );
+  writeFileSync(
+    path.join(dir, "src", "App.tsx"),
+    'export function App() {\n  return <div data-testid="fixture-app">fixture</div>;\n}\n'
+  );
+  writeFileSync(
+    path.join(dir, "src", "app.test.ts"),
+    'import { describe, expect, it } from "vitest";\n\ndescribe("fixture", () => {\n  it("sanity", () => {\n    expect(1 + 1).toBe(2);\n  });\n});\n'
+  );
 }
 
 afterAll(() => {
@@ -34,21 +71,29 @@ afterAll(() => {
   }
 });
 
-describe("可信模板构建流水线", () => {
-  it("workspace_init 幂等：第二次初始化不覆盖已有文件", () => {
+describe("工作区初始化（系统骨架，无模板）", () => {
+  it("workspace_init 只写入系统骨架；幂等：第二次初始化不覆盖已有文件", () => {
     const dir = makeWorkspace();
     const first = initWorkspace(dir, { taskId: "task-000000000001" });
-    expect(first.seededFrom).toBe("template");
+    expect(first.seededFrom).toBe("skeleton");
+    // System skeleton present, example-app template absent.
+    expect(listSourceFiles(dir).some((f) => f.path === "package.json")).toBe(true);
+    expect(listSourceFiles(dir).some((f) => f.path === "tsconfig.json")).toBe(true);
+    expect(listSourceFiles(dir).some((f) => f.path === "src/lib/qubits.ts")).toBe(true);
+    expect(listSourceFiles(dir).some((f) => f.path === "qubits.manifest.json")).toBe(false);
+    expect(listSourceFiles(dir).some((f) => f.path === "src/main.tsx")).toBe(false);
+
     writeFileSync(path.join(dir, "src", "custom.tsx"), "export const marker = 1;\n");
     const second = initWorkspace(dir, { taskId: "task-000000000001" });
     expect(second.seededFrom).toBe("existing");
     expect(readFileSync(path.join(dir, "src", "custom.tsx"), "utf8")).toContain("marker");
-    expect(listSourceFiles(dir).some((f) => f.path === "qubits.manifest.json")).toBe(true);
   });
 
-  it.skipIf(!dockerAvailable())("模板通过 lint、typecheck、tests、build（真实 Docker 容器内执行），并产生真实 preview bundle", async () => {
+  it.skipIf(!dockerAvailable())("骨架 + 自写应用通过 lint、typecheck、tests、build（真实 Docker 容器内执行），并产生真实 preview bundle", async () => {
     const dir = makeWorkspace();
     initWorkspace(dir, { taskId: "task-000000000002" });
+    writeFixtureManifest(dir);
+    writeFixtureApp(dir);
     const sandbox = new ContainerSandboxProvider();
 
     const typecheck = await runWorkspaceTypecheck(sandbox, dir);
@@ -74,6 +119,7 @@ describe("可信模板构建流水线", () => {
   it("静态扫描阻断 eval / fetch / localStorage（SECURITY_BLOCKED）", async () => {
     const dir = makeWorkspace();
     initWorkspace(dir, { taskId: "task-000000000003" });
+    writeFixtureManifest(dir);
     writeFileSync(
       path.join(dir, "src", "evil.ts"),
       'const run = eval("2+2");\nexport const grab = () => fetch("https://evil.example");\nexport const keep = localStorage.getItem("x");\n'
@@ -92,6 +138,7 @@ describe("可信模板构建流水线", () => {
   it("未授权依赖被拒绝（INVALID_DEPENDENCY）", async () => {
     const dir = makeWorkspace();
     initWorkspace(dir, { taskId: "task-000000000004" });
+    writeFixtureManifest(dir);
     writeFileSync(path.join(dir, "src", "app.ts"), 'import something from "left-pad";\nexport default something;\n');
     const manifest = JSON.parse(readFileSync(path.join(dir, "qubits.manifest.json"), "utf8"));
     const check = checkWorkspaceDependencies(dir, manifest);
@@ -105,7 +152,8 @@ describe("可信模板构建流水线", () => {
   it("构建失败不产出 bundle（错误代码保留在报告中）", async () => {
     const dir = makeWorkspace();
     initWorkspace(dir, { taskId: "task-000000000005" });
-    writeFileSync(path.join(dir, "src", "App.tsx"), "export function App( {\n");
+    writeFixtureManifest(dir);
+    writeFileSync(path.join(dir, "src", "main.tsx"), "export function App( {\n");
     const result = await buildApp(dir);
     expect(result.report.status).toBe("failed");
     expect(result.report.errorCode).toBe("BUILD_FAILED");

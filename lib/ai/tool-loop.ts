@@ -495,7 +495,7 @@ function summarizeResult(toolName: string, result: unknown): string {
 }
 
 const SEEDED_LABELS: Record<string, string> = {
-  template: "可信模板",
+  skeleton: "系统骨架",
   snapshot: "上次成功快照",
   existing: "已存在（复用）",
 };

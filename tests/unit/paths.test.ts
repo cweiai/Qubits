@@ -187,6 +187,8 @@ describe("文件工具级 jail（executeTool）", () => {
   it("fs_copy / fs_move / fs_delete 不能越界", async () => {
     const dir = makeScratch("qubits-fsops-");
     initWorkspace(dir, { taskId: "task-jail-00000003" });
+    // No template manifest: write one as the copy/move source fixture.
+    writeFileSync(path.join(dir, "qubits.manifest.json"), JSON.stringify({ schemaVersion: 1, name: "x", description: "x", main: "src/main.tsx", collections: [], dependencies: [] }));
     const outside = makeScratch("qubits-outside7-");
     writeFileSync(path.join(outside, "victim.txt"), "outside-content");
     symlinkSync(outside, path.join(dir, "escape"));

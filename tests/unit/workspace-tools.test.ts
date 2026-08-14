@@ -55,17 +55,21 @@ describe("workspace 工具", () => {
     await expect(executeTool("run_build", {}, ctx)).rejects.toThrowError(/尚未初始化/);
   });
 
-  it("workspace_init 幂等；模板文件存在且系统文件受保护", async () => {
+  it("workspace_init 幂等；只写入系统骨架且系统文件受保护", async () => {
     const ctx = makeContext();
     const first = await executeTool("workspace_init", {}, ctx) as { initialized: boolean; seededFrom: string };
     expect(first.initialized).toBe(true);
+    expect(first.seededFrom).toBe("skeleton");
     const second = await executeTool("workspace_init", {}, ctx) as { initialized: boolean; seededFrom: string };
     expect(second.initialized).toBe(false);
     expect(second.seededFrom).toBe("existing");
 
     const files = await executeTool("workspace_list_files", { maxEntries: 100 }, ctx) as { entries: Array<{ path: string; systemOwned: boolean }> };
-    expect(files.entries.some((f) => f.path === "src/main.tsx")).toBe(true);
-    expect(files.entries.some((f) => f.path === "qubits.manifest.json")).toBe(true);
+    expect(files.entries.some((f) => f.path === "package.json")).toBe(true);
+    expect(files.entries.some((f) => f.path === "src/lib/qubits.ts")).toBe(true);
+    // No example-app template: manifest/entry/tests are written by the agent.
+    expect(files.entries.some((f) => f.path === "qubits.manifest.json")).toBe(false);
+    expect(files.entries.some((f) => f.path === "src/main.tsx")).toBe(false);
     expect(files.entries.find((f) => f.path === "package.json")?.systemOwned).toBe(true);
     expect(files.entries.find((f) => f.path === "src/lib/qubits.ts")?.systemOwned).toBe(true);
 
@@ -81,6 +85,22 @@ describe("workspace 工具", () => {
     await expect(
       executeTool("fs_write", { path: "qubits.manifest.json", content: JSON.stringify({ schemaVersion: 1, name: "x", main: "src/evil.tsx" }) }, ctx)
     ).rejects.toThrowError(/校验失败/);
+    // A valid manifest (agent-written; no template seeds it) is accepted with the pinned entry.
+    await executeTool(
+      "fs_write",
+      {
+        path: "qubits.manifest.json",
+        content: JSON.stringify({
+          schemaVersion: 1,
+          name: "x",
+          description: "x",
+          main: "src/main.tsx",
+          collections: [],
+          dependencies: [],
+        }),
+      },
+      ctx
+    );
     const manifest = await executeTool("workspace_get_manifest", {}, ctx) as { name: string; main: string };
     expect(manifest.main).toBe("src/main.tsx");
   });

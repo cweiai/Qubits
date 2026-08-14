@@ -88,8 +88,24 @@ describe("Registry 与权限", () => {
 
   it("艾玛可以真实调用 workspace_get_manifest（曾因定义 allowedRoles 缺 product_manager 被拒）", async () => {
     await executeTool("workspace_init", {}, makeContext());
+    // No template seeds a manifest anymore: write a valid one, then read it as Emma.
+    await executeTool(
+      "fs_write",
+      {
+        path: "qubits.manifest.json",
+        content: JSON.stringify({
+          schemaVersion: 1,
+          name: "测试应用",
+          description: "x",
+          main: "src/main.tsx",
+          collections: [],
+          dependencies: [],
+        }),
+      },
+      makeContext()
+    );
     const manifest = await executeTool("workspace_get_manifest", {}, makeContext("product_manager")) as { name: string };
-    expect(typeof manifest.name).toBe("string");
+    expect(manifest.name).toBe("测试应用");
   });
 
   it("越权调用被拒绝；未知工具被拒绝", async () => {
