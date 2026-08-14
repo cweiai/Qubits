@@ -45,7 +45,7 @@ const RULES: ScanRule[] = [
   { name: "NO_OS_IMPORT", pattern: /from\s+["'](?:node:)?(?:os|net|tls|http2?|https|vm|worker_threads|dgram|dns)["']/, message: "禁止导入服务端内置模块" },
 ];
 
-/** SDK bridge + launcher are trusted template files maintained by the system. */
+/** SDK bridge + launcher are trusted system skeleton files maintained by the system. */
 const TRUSTED_TEMPLATE_FILES = new Set(["src/lib/qubits.ts"]);
 
 const MAX_FILE_BYTES = 512 * 1024;
