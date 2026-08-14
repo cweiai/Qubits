@@ -83,11 +83,13 @@ describe("ContainerSandboxProvider（生产接口，fail closed）", () => {
 });
 
 describe("getSandboxProvider", () => {
-  it("默认 local-dev；container 走生产接口；未知值不静默回退", () => {
+  it("默认 container（物理隔离）；local-dev 仅显式指定；未知值不静默回退", () => {
     delete process.env.SANDBOX_PROVIDER;
-    expect(getSandboxProvider()?.kind).toBe("local-dev");
+    expect(getSandboxProvider()?.kind).toBe("container");
     process.env.SANDBOX_PROVIDER = "container";
     expect(getSandboxProvider()?.kind).toBe("container");
+    process.env.SANDBOX_PROVIDER = "local-dev";
+    expect(getSandboxProvider()?.kind).toBe("local-dev");
     process.env.SANDBOX_PROVIDER = "local-demo"; // legacy value → dev sandbox
     expect(getSandboxProvider()?.kind).toBe("local-dev");
     process.env.SANDBOX_PROVIDER = "unknown-provider";

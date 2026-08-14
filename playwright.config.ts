@@ -26,6 +26,9 @@ export default defineConfig({
       DATABASE_URL: "file:./data/e2e.db",
       QUIBITS_MOCK_PROVIDER: "true",
       REFERENCE_SEARCH_PROVIDER: "mock",
+      // e2e runs without Docker: explicitly opt into the dev-only provider
+      // (default is container, which fails closed when Docker is absent).
+      SANDBOX_PROVIDER: "local-dev",
     },
   },
   projects: [

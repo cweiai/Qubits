@@ -5,11 +5,13 @@ import { existsSync, mkdirSync } from "node:fs";
 /**
  * SandboxProvider abstraction for executing build/check commands against a workspace.
  *
- * - LocalDevSandboxProvider ("local-dev"): development/testing ONLY. It is explicitly
- *   NOT a production security boundary — it provides cwd jailing, an env allowlist,
- *   secret stripping and output caps, but no kernel/container isolation.
- * - ContainerSandboxProvider ("container"): the production interface. When Docker is
- *   not available it FAILS CLOSED — it never silently falls back to host execution.
+ * - ContainerSandboxProvider ("container"): THE DEFAULT. Physical isolation — non-root
+ *   user, only the workspace mounted, read-only root, no network, resource limits.
+ *   When Docker is not available it FAILS CLOSED — it never silently falls back to
+ *   host execution.
+ * - LocalDevSandboxProvider ("local-dev"): explicit opt-in ONLY for unit/e2e tests.
+ *   It is explicitly NOT a security boundary — no kernel/container isolation — and is
+ *   never selected unless SANDBOX_PROVIDER is set to local-dev.
  *
  * Invariants shared by every provider: spawn(command, args) with shell:false, command
  * allowlist, timeout/output/process caps, sensitive env stripping, no network by
@@ -223,7 +225,8 @@ export class ContainerSandboxProvider implements SandboxProvider {
   private processes = new Map<number, { alive: boolean; command: string }>();
 
   constructor(image?: string) {
-    this.image = image ?? process.env.SANDBOX_IMAGE ?? "node:22-alpine";
+    // Default is the Debian-based node image: it ships bash (required by the bash tool).
+    this.image = image ?? process.env.SANDBOX_IMAGE ?? "node:22";
     this.unavailableReason = detectDockerUnavailable();
   }
 
@@ -379,9 +382,9 @@ function detectDockerUnavailable(): string | null {
 }
 
 export function getSandboxProvider(): SandboxProvider | null {
-  const kind = process.env.SANDBOX_PROVIDER || "local-dev";
-  if (kind === "local-dev" || kind === "local-demo") return new LocalDevSandboxProvider();
+  const kind = process.env.SANDBOX_PROVIDER || "container"; // physical isolation by default
   if (kind === "container") return new ContainerSandboxProvider(); // fail closed when Docker is absent
+  if (kind === "local-dev" || kind === "local-demo") return new LocalDevSandboxProvider(); // explicit opt-in for tests only
   if (kind === "none") return null;
   return null; // unknown providers are NOT_CONFIGURED, never a silent local fallback
 }
