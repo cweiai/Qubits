@@ -1,0 +1,8 @@
+{
+  "name": "qubits-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Qubits generated application (package.json and build configuration are system-maintained)",
+  "scripts": {},
+  "dependencies": {}
+}
