@@ -68,6 +68,21 @@ describe("Registry 与权限", () => {
     expect(getToolNamesForRole("reviewer")).toContain("secret_scan");
   });
 
+  it("权限矩阵由 allowedRoles 推导：被授予的工具必然可执行（无两层名单脱节）", () => {
+    const roles = ["team_leader", "product_manager", "researcher", "architect", "engineer", "data_scientist", "reviewer", "security_reviewer"] as const;
+    for (const role of roles) {
+      const granted = getToolNamesForRole(role);
+      const derived = listToolNames().filter((name) => getToolDefinition(name)!.allowedRoles.includes(role));
+      expect([...granted].sort()).toEqual([...derived].sort());
+    }
+  });
+
+  it("艾玛可以真实调用 workspace_get_manifest（曾因定义 allowedRoles 缺 product_manager 被拒）", async () => {
+    await executeTool("workspace_init", {}, makeContext());
+    const manifest = await executeTool("workspace_get_manifest", {}, makeContext("product_manager")) as { name: string };
+    expect(typeof manifest.name).toBe("string");
+  });
+
   it("越权调用被拒绝；未知工具被拒绝", async () => {
     await expect(executeTool("delegate_to_agent", { targetRole: "engineer", task: "x", expectedOutput: "code_workspace" }, makeContext("engineer"))).rejects.toThrowError(/无权/);
     await expect(executeTool("fs_write", { path: "a.txt", content: "x" }, makeContext("product_manager"))).rejects.toThrowError(/无权/);

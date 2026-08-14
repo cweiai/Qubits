@@ -75,17 +75,25 @@ const DEFINITIONS: Record<string, AnyToolDefinition> = {
   rollback_release: rollbackReleaseTool,
 };
 
-/** Server-enforced capability matrix. */
-const TOOL_PERMISSIONS: Record<RoleId, string[]> = {
-  team_leader: ["delegate_to_agent", "search_references", "inspect_current_app", "render_preview", "complete_run", "request_user_approval", "create_artifact", "get_artifact", "compare_artifacts", "workspace_get_manifest", "workspace_list_files", "fs_list", "fs_read", "fs_stat", "create_code_snapshot", "restore_code_snapshot", "list_references", "summarize_references", "create_checkpoint", "restore_checkpoint", "create_migration_plan", "run_migration", "publish_preview", "create_share_link", "rollback_release"],
-  product_manager: ["fs_read", "inspect_current_app", "get_artifact", "workspace_get_manifest"],
-  researcher: ["search_references", "open_reference", "extract_reference_content", "search_docs", "search_ui_examples", "search_competitors", "summarize_references", "verify_reference", "save_reference", "list_references"],
-  architect: ["bash", "fs_read", "fs_list", "fs_stat", "inspect_current_app", "get_artifact", "create_artifact", "workspace_get_manifest", "workspace_list_files"],
-  engineer: ["bash", "workspace_init", "workspace_get_manifest", "workspace_list_files", "fs_list", "fs_read", "fs_write", "fs_patch", "fs_stat", "fs_delete", "fs_create_dir", "fs_copy", "fs_move", "dependency_list", "dependency_add", "dependency_remove", "run_format", "run_lint", "run_typecheck", "run_tests", "run_build", "get_build_errors", "get_test_failures", "security_scan", "create_code_snapshot", "restore_code_snapshot", "inspect_current_app", "create_artifact", "get_artifact", "compare_artifacts", "create_checkpoint", "request_user_approval", "seed_demo_data", "create_record", "update_record", "delete_record"],
-  data_scientist: ["inspect_data_schema", "query_records", "count_records", "aggregate_records", "analyze_project_data", "get_artifact", "create_artifact", "validate_data_access", "create_record", "update_record", "delete_record", "seed_demo_data"],
-  reviewer: ["bash", "inspect_current_app", "workspace_get_manifest", "workspace_list_files", "fs_read", "fs_list", "fs_stat", "dependency_list", "run_lint", "run_typecheck", "run_tests", "run_build", "get_build_errors", "get_test_failures", "security_scan", "review_changes", "security_review", "secret_scan", "dependency_audit", "check_data_isolation", "get_artifact", "count_records", "list_references"],
-  security_reviewer: ["inspect_current_app", "workspace_get_manifest", "fs_read", "security_scan", "review_changes", "security_review", "secret_scan", "dependency_audit", "check_data_isolation", "get_artifact"],
-};
+/**
+ * Server-enforced capability matrix. It is NOT hand-written: it is derived from each
+ * tool definition's allowedRoles field, which is the single source of truth for role
+ * permissions. This guarantees a tool is never advertised to a role that cannot
+ * execute it (no more FORBIDDEN_ROLE surprises). Adding a new RoleId is a compile
+ * error here — every role must be present even with an empty list.
+ */
+const TOOL_PERMISSIONS: Record<RoleId, string[]> = (() => {
+  const matrix: Record<RoleId, string[]> = {
+    team_leader: [], product_manager: [], researcher: [], architect: [],
+    engineer: [], data_scientist: [], reviewer: [], security_reviewer: [],
+  };
+  for (const [name, definition] of Object.entries(DEFINITIONS)) {
+    for (const role of definition.allowedRoles) {
+      matrix[role].push(name);
+    }
+  }
+  return matrix;
+})();
 
 export function getToolNamesForRole(roleId: RoleId): string[] {
   return TOOL_PERMISSIONS[roleId] ?? [];

@@ -69,7 +69,7 @@ export const fsListTool: ServerToolDefinition<{ path: string; maxDepth: number; 
   description: "列出 workspace 内目录（限制深度与条目数）。path 必须是工作区内相对路径（禁止绝对路径与 ../）。",
   argsSchema: fsListArgsSchema,
   resultSchema: fsListResultSchema,
-  allowedRoles: ["engineer", "reviewer", "team_leader"],
+  allowedRoles: ["engineer", "reviewer", "team_leader", "architect"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {

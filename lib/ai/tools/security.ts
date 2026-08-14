@@ -45,7 +45,7 @@ export const reviewChangesTool: ServerToolDefinition<{ path?: string }, { findin
   description: "审查 workspace 内变更（与最近检查点/初始状态对比的启发式检查）。",
   argsSchema: z.object({ path: z.string().max(300).default(".") }),
   resultSchema: issuesResultSchema,
-  allowedRoles: ["reviewer"],
+  allowedRoles: ["reviewer", "security_reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -69,7 +69,7 @@ export const securityReviewTool: ServerToolDefinition<{ artifactId: string }, { 
     summary: z.string().max(300),
     issues: z.array(z.object({ code: z.string(), severity: z.enum(["error", "warning"]), path: z.string(), message: z.string(), repairHint: z.string() })).max(20),
   }),
-  allowedRoles: ["reviewer"],
+  allowedRoles: ["reviewer", "security_reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -96,7 +96,7 @@ export const secretScanTool: ServerToolDefinition<Record<string, never>, { findi
   description: "扫描 workspace 中的密钥/凭据模式。",
   argsSchema: z.object({}).strict(),
   resultSchema: issuesResultSchema,
-  allowedRoles: ["reviewer"],
+  allowedRoles: ["reviewer", "security_reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
@@ -118,7 +118,7 @@ export const dependencyAuditTool: ServerToolDefinition<Record<string, never>, { 
   description: "对 workspace 依赖清单做受限审计（本地实现：版本范围检查；完整漏洞库需要外部服务）。",
   argsSchema: z.object({}).strict(),
   resultSchema: issuesResultSchema,
-  allowedRoles: ["reviewer"],
+  allowedRoles: ["reviewer", "security_reviewer"],
   risk: "medium",
   requiresApproval: false,
   async execute(_args, context) {

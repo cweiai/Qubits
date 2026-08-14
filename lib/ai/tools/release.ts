@@ -14,7 +14,7 @@ export const createMigrationPlanTool: ServerToolDefinition<Record<string, never>
   description: "生成数据库迁移计划（未配置迁移服务时 NOT_CONFIGURED）。",
   argsSchema: z.object({}).strict(),
   resultSchema: migrationPlanResultSchema,
-  allowedRoles: ["team_leader", "architect"],
+  allowedRoles: ["team_leader"],
   risk: "high",
   requiresApproval: false,
   async execute(_args, _context) {

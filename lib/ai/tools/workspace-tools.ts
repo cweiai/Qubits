@@ -80,7 +80,7 @@ export const workspaceGetManifestTool: ServerToolDefinition<z.infer<typeof works
   description: "读取并校验当前工作区的 qubits.manifest.json（应用信息、数据集合、权限与构建入口）。",
   argsSchema: workspaceGetManifestArgsSchema,
   resultSchema: workspaceGetManifestResultSchema,
-  allowedRoles: ["engineer", "architect", "reviewer", "team_leader"],
+  allowedRoles: ["engineer", "architect", "reviewer", "team_leader", "product_manager", "security_reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {

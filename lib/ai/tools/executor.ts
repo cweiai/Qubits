@@ -15,7 +15,7 @@ export const inspectCurrentAppTool: ServerToolDefinition<z.infer<typeof inspectC
   description: "读取当前应用经过校验的 manifest 摘要（可选包含记录计数），不返回凭据、代码或完整数据。",
   argsSchema: inspectCurrentAppArgsSchema,
   resultSchema: inspectCurrentAppResultSchema,
-  allowedRoles: ["team_leader", "product_manager", "architect", "engineer", "data_scientist", "reviewer"],
+  allowedRoles: ["team_leader", "product_manager", "architect", "engineer", "data_scientist", "reviewer", "security_reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {

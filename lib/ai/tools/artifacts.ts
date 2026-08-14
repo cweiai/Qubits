@@ -25,7 +25,7 @@ export const getArtifactTool: ServerToolDefinition<{ artifactId: string }, { art
   description: "读取当前 run 的 artifact 摘要（不返回完整内部内容）。",
   argsSchema: getArtifactArgsSchema,
   resultSchema: getArtifactResultSchema,
-  allowedRoles: ["team_leader", "product_manager", "architect", "engineer", "data_scientist", "reviewer"],
+  allowedRoles: ["team_leader", "product_manager", "architect", "engineer", "data_scientist", "reviewer", "security_reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
