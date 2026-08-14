@@ -39,6 +39,8 @@ export interface ChildAgentRequest {
   task: string;
   expectedOutput: string;
   inputArtifacts: Array<{ id: string; kind: ArtifactKind }>;
+  /** Single run id shared across delegated/started/completed events (one row per child run). */
+  agentRunId: string;
 }
 
 export interface ChildAgentResult {

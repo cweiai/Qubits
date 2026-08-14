@@ -83,6 +83,16 @@ describe("迈克主编排（mock provider）", () => {
       );
       expect(productDelegate).toBeTruthy();
       expect((productDelegate as { parentAgentRunId: string }).parentAgentRunId).toBe(first.agentRunId);
+      // A single run id must thread through delegated → started → completed (no ghost rows).
+      const delegatedEvents = events.filter((e) => e.type === "agent_delegated");
+      const startedEvents = events.filter((e) => e.type === "agent_started");
+      for (const del of delegatedEvents) {
+        const id = (del as { childAgentRunId: string }).childAgentRunId;
+        expect(startedEvents.some((e) => (e as { agentRunId: string }).agentRunId === id)).toBe(true);
+        expect(
+          events.some((e) => e.type === "agent_completed" && (e as { agentRunId: string }).agentRunId === id)
+        ).toBe(true);
+      }
       // Every tool_call_started has a matching tool_result.
       const started = events.filter((e) => e.type === "tool_call_started");
       const results = events.filter((e) => e.type === "tool_result");

@@ -77,6 +77,8 @@ export const delegateToAgentTool: ServerToolDefinition<z.infer<typeof delegateTo
       task: args.task,
       expectedOutput: args.expectedOutput,
       inputArtifacts,
+      // One id shared across delegated/started/completed events (single row per child run).
+      agentRunId: childAgentRunId,
     });
 
     if (result.status === "completed") {

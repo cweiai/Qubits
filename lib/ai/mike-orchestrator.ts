@@ -140,7 +140,8 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
 
   async function runChildAgent(request: ChildAgentRequest): Promise<ChildAgentResult> {
     const definition = ROLE_DEFINITIONS[request.roleId];
-    const childAgentRunId = "agent-" + crypto.randomUUID();
+    // Shared id: delegated/started/completed events all reference the same run row.
+    const childAgentRunId = request.agentRunId;
     input.emit({
       type: "agent_started",
       agentRunId: childAgentRunId,
