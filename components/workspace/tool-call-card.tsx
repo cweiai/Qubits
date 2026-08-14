@@ -10,7 +10,6 @@ import {
   FileCode2,
   FilePen,
   FilePlus2,
-  FileSearch,
   FileText,
   FlaskConical,
   FolderPlus,
@@ -24,6 +23,7 @@ import {
   PackageMinus,
   Search,
   ShieldCheck,
+  Terminal,
   UserPlus,
   Wrench,
   X,
@@ -142,8 +142,6 @@ function formatLegacyRecord(toolName: string, record: Record<string, unknown>): 
       return "读取 " + str(record.path) + (record.truncated ? "（已截断）" : "");
     case "fs_list":
       return "列出 " + len(record.entries) + " 项";
-    case "fs_search":
-      return "搜索命中 " + len(record.matches) + " 处";
     case "fs_stat":
       return "stat " + str(record.path) + "（" + str(record.type) + " · " + num(record.size) + " 字节）";
     case "fs_delete":
@@ -183,8 +181,8 @@ function formatLegacyRecord(toolName: string, record: Record<string, unknown>): 
       return "已检查 " + num(record.formatted) + " 个文件，改写 " + num(record.changed) + " 个";
     case "render_preview":
       return "预览已就绪：" + str(record.appName) + " v" + num(record.version);
-    case "sandbox_exec":
-      return "沙盒执行 exitCode=" + num(record.exitCode) + (record.timedOut ? "（超时）" : "");
+    case "bash":
+      return "命令 exitCode=" + num(record.exitCode) + (record.timedOut ? "（超时）" : "") + " · 输出 " + str(record.stdout).length + " 字符";
     default:
       return null;
   }
@@ -229,13 +227,12 @@ const TOOL_ICONS: Record<string, typeof Wrench> = {
   fs_read: FileText,
   fs_patch: FilePen,
   fs_list: FolderTree,
-  fs_search: FileSearch,
   fs_stat: FileCode2,
   fs_delete: X,
   fs_create_dir: FolderPlus,
   fs_copy: FileCode2,
   fs_move: FileCode2,
-  sandbox_exec: Wrench,
+  bash: Terminal,
   query_records: Database,
   count_records: Database,
   create_record: Database,
@@ -252,7 +249,7 @@ const TOOL_LABELS: Record<string, string> = {
   complete_run: "完成运行",
   inspect_current_app: "检查当前应用",
   analyze_project_data: "数据分析",
-  sandbox_exec: "沙盒执行",
+  bash: "执行命令",
   workspace_init: "初始化工作区",
   workspace_get_manifest: "读取 manifest",
   workspace_list_files: "列出文件",
@@ -273,7 +270,6 @@ const TOOL_LABELS: Record<string, string> = {
   fs_read: "读取文件",
   fs_patch: "修改文件",
   fs_list: "列出目录",
-  fs_search: "搜索文件",
   fs_stat: "文件信息",
   fs_delete: "删除文件",
   fs_create_dir: "创建目录",

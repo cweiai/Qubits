@@ -4,7 +4,7 @@ import { ToolExecutionError } from "./types";
 import { requestApprovalArgsSchema, requestApprovalResultSchema } from "./schemas";
 
 /**
- * Approval: high-risk tools (fs_delete/sandbox_reset/delete_record/run_migration etc.)
+ * Approval: high-risk tools (fs_delete/delete_record/run_migration etc.)
  * must first be authorized via request_user_approval or execution returns APPROVAL_REQUIRED.
  * Grants are isolated per runId in a server-side in-memory ApprovalStore.
  */

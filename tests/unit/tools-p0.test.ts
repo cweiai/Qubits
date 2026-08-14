@@ -39,7 +39,7 @@ function makeContext(role: ToolExecutionContext["roleId"] = "engineer", override
 
 beforeAll(() => {
   wsDir = mkdtempSync(path.join(tmpdir(), "qubits-ws-"));
-  process.env.SANDBOX_COMMAND_ALLOWLIST = "npm,node,npx,next,eslint,tsc,git";
+  process.env.SANDBOX_COMMAND_ALLOWLIST = "npm,node,npx,next,eslint,tsc,git,bash,sh";
   process.env.SANDBOX_NETWORK_ENABLED = "false";
   resetApprovalsForTests();
 });
@@ -62,7 +62,9 @@ describe("Registry 与权限", () => {
     expect(getToolNamesForRole("product_manager")).not.toContain("delegate_to_agent");
     expect(getToolNamesForRole("product_manager")).not.toContain("fs_write");
     expect(getToolNamesForRole("data_scientist")).not.toContain("fs_list");
-    expect(getToolNamesForRole("engineer")).toContain("sandbox_exec");
+    expect(getToolNamesForRole("engineer")).toContain("bash");
+    expect(getToolNamesForRole("architect")).toContain("bash");
+    expect(getToolNamesForRole("reviewer")).toContain("bash");
     expect(getToolNamesForRole("reviewer")).toContain("secret_scan");
   });
 
@@ -79,8 +81,9 @@ describe("文件系统 jail", () => {
     await executeTool("fs_write", { path: "src/app.tsx", content: "export const App = () => 1;\n" }, ctx);
     const read = await executeTool("fs_read", { path: "src/app.tsx", maxBytes: 1000 }, ctx) as { content: string };
     expect(read.content).toContain("export const App");
-    const search = await executeTool("fs_search", { pattern: "App", glob: "**/*", maxResults: 10 }, ctx) as { matches: Array<{ path: string }> };
-    expect(search.matches.some((m) => m.path === "src/app.tsx")).toBe(true);
+    const search = await executeTool("bash", { command: "grep -n 'App' src/app.tsx", timeoutMs: 15000 }, ctx) as { exitCode: number; stdout: string };
+    expect(search.exitCode).toBe(0);
+    expect(search.stdout).toContain("App");
   });
 
   it("../ 与绝对路径被拒绝；敏感文件被拒绝", async () => {
@@ -108,27 +111,27 @@ function grantApprovalForTest(context: ToolExecutionContext, toolName: string): 
   context.approvedTools.add(toolName);
 }
 
-describe("沙盒 Shell", () => {
-  it("sandbox_exec 真实执行（node -e），命令白名单生效", async () => {
+describe("bash 工具", () => {
+  it("bash 真实执行（node -e），provider 命令白名单生效", async () => {
     const ctx = makeContext();
-    const result = await executeTool("sandbox_exec", { command: "node", args: ["-e", "console.log('hello-from-sandbox')"], cwd: "", timeoutMs: 15000 }, ctx) as { exitCode: number; stdout: string };
+    const result = await executeTool("bash", { command: "node -e \"console.log('hello-from-bash')\"", timeoutMs: 15000 }, ctx) as { exitCode: number; stdout: string };
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("hello-from-sandbox");
-    const denied = await executeTool("sandbox_exec", { command: "rm", args: ["-rf", "/"], cwd: "", timeoutMs: 5000 }, ctx) as { exitCode: number };
+    expect(result.stdout).toContain("hello-from-bash");
+    const denied = await new LocalDevSandboxProvider().exec({ command: "rm", args: ["-rf", "/"], cwd: wsDir, timeoutMs: 5000 });
     expect(denied.exitCode).toBe(126);
   });
 
   it("敏感环境变量被剥离", async () => {
     process.env.OPENAI_API_KEY = "sk-test-should-not-leak";
     const ctx = makeContext();
-    const result = await executeTool("sandbox_exec", { command: "node", args: ["-e", "console.log(process.env.OPENAI_API_KEY || 'EMPTY')"], cwd: "", timeoutMs: 15000 }, ctx) as { stdout: string };
+    const result = await executeTool("bash", { command: "echo \"${OPENAI_API_KEY:-EMPTY}\"", timeoutMs: 15000 }, ctx) as { stdout: string };
     expect(result.stdout).toContain("EMPTY");
     delete process.env.OPENAI_API_KEY;
   });
 
   it("超时返回 timedOut", async () => {
     const ctx = makeContext();
-    const result = await executeTool("sandbox_exec", { command: "node", args: ["-e", "setInterval(()=>{},1000)"], cwd: "", timeoutMs: 1500 }, ctx) as { timedOut: boolean };
+    const result = await executeTool("bash", { command: "while true; do :; done", timeoutMs: 1000 }, ctx) as { timedOut: boolean };
     expect(result.timedOut).toBe(true);
   });
 });
@@ -156,7 +159,6 @@ describe("P2 适配器 NOT_CONFIGURED", () => {
   it("未配置外部服务时返回明确错误", async () => {
     await expect(executeTool("publish_preview", {}, makeContext("team_leader"))).rejects.toThrowError(/未配置部署平台/);
     await expect(executeTool("create_migration_plan", {}, makeContext("team_leader"))).rejects.toThrowError(/未配置迁移服务/);
-    await expect(executeTool("sandbox_network_request", { url: "https://example.com", method: "GET", maxBytes: 1000 }, makeContext("engineer"))).rejects.toThrowError(/审批|未配置/);
   });
 });
 

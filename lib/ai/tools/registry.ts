@@ -9,12 +9,9 @@ import { inspectCurrentAppTool } from "./executor";
 import { completeRunTool, renderPreviewTool } from "./preview";
 import {
   fsCopyTool, fsCreateDirTool, fsDeleteTool, fsListTool, fsMoveTool, fsPatchTool,
-  fsReadTool, fsSearchTool, fsStatTool, fsWriteTool,
+  fsReadTool, fsStatTool, fsWriteTool,
 } from "./filesystem";
-import {
-  sandboxCreateTool, sandboxExecTool, sandboxExecStreamTool, sandboxExportArtifactTool,
-  sandboxGetProcessTool, sandboxKillTool, sandboxNetworkRequestTool, sandboxReadLogsTool, sandboxResetTool,
-} from "./sandbox";
+import { bashTool } from "./bash";
 import { getBuildErrorsTool, getTestFailuresTool, runBuildTool, runLintTool, runTestsTool, runTypecheckTool } from "./build";
 import {
   createCodeSnapshotTool, dependencyAddTool, dependencyListTool, dependencyRemoveTool,
@@ -28,9 +25,9 @@ import {
 } from "./data";
 import { requestUserApprovalTool } from "./approval";
 import { compareArtifactsTool, createArtifactTool, getArtifactTool } from "./artifacts";
-import { createCheckpointTool, createPatchTool, gitDiffTool, gitStatusTool, restoreCheckpointTool } from "./version-control";
+import { createCheckpointTool, restoreCheckpointTool } from "./version-control";
 import { dependencyAuditTool, reviewChangesTool, secretScanTool, securityReviewTool } from "./security";
-import { createMigrationPlanTool, createShareLinkTool, gitCommitTool, publishPreviewTool, rollbackReleaseTool, runMigrationTool } from "./release";
+import { createMigrationPlanTool, createShareLinkTool, publishPreviewTool, rollbackReleaseTool, runMigrationTool } from "./release";
 import { extractReferenceContentTool, listReferencesTool, saveReferenceTool, searchCompetitorsTool, searchDocsTool, searchUiExamplesTool, summarizeReferencesTool, verifyReferenceTool } from "./reference-extras";
 
 const DEFINITIONS: Record<string, AnyToolDefinition> = {
@@ -44,6 +41,7 @@ const DEFINITIONS: Record<string, AnyToolDefinition> = {
   get_artifact: getArtifactTool,
   compare_artifacts: compareArtifactsTool,
   request_user_approval: requestUserApprovalTool,
+  bash: bashTool,
   workspace_init: workspaceInitTool,
   workspace_get_manifest: workspaceGetManifestTool,
   workspace_list_files: workspaceListFilesTool,
@@ -54,13 +52,8 @@ const DEFINITIONS: Record<string, AnyToolDefinition> = {
   create_code_snapshot: createCodeSnapshotTool,
   restore_code_snapshot: restoreCodeSnapshotTool,
   fs_list: fsListTool, fs_read: fsReadTool, fs_write: fsWriteTool, fs_patch: fsPatchTool,
-  fs_search: fsSearchTool, fs_stat: fsStatTool, fs_delete: fsDeleteTool,
+  fs_stat: fsStatTool, fs_delete: fsDeleteTool,
   fs_create_dir: fsCreateDirTool, fs_copy: fsCopyTool, fs_move: fsMoveTool,
-  sandbox_create: sandboxCreateTool, sandbox_exec: sandboxExecTool,
-  sandbox_exec_stream: sandboxExecStreamTool, sandbox_read_logs: sandboxReadLogsTool,
-  sandbox_kill_process: sandboxKillTool, sandbox_get_process: sandboxGetProcessTool,
-  sandbox_reset: sandboxResetTool, sandbox_export_artifact: sandboxExportArtifactTool,
-  sandbox_network_request: sandboxNetworkRequestTool,
   run_format: runFormatTool,
   run_lint: runLintTool, run_typecheck: runTypecheckTool, run_tests: runTestsTool,
   run_build: runBuildTool,
@@ -70,8 +63,7 @@ const DEFINITIONS: Record<string, AnyToolDefinition> = {
   create_record: createRecordTool, update_record: updateRecordTool, delete_record: deleteRecordTool,
   seed_demo_data: seedDemoDataTool, analyze_project_data: analyzeProjectDataToolV2,
   validate_data_access: validateDataAccessTool, check_data_isolation: checkDataIsolationTool,
-  git_status: gitStatusTool, git_diff: gitDiffTool, create_checkpoint: createCheckpointTool,
-  restore_checkpoint: restoreCheckpointTool, create_patch: createPatchTool,
+  create_checkpoint: createCheckpointTool, restore_checkpoint: restoreCheckpointTool,
   review_changes: reviewChangesTool, security_review: securityReviewTool,
   secret_scan: secretScanTool, dependency_audit: dependencyAuditTool,
   extract_reference_content: extractReferenceContentTool, search_docs: searchDocsTool,
@@ -80,18 +72,18 @@ const DEFINITIONS: Record<string, AnyToolDefinition> = {
   save_reference: saveReferenceTool, list_references: listReferencesTool,
   create_migration_plan: createMigrationPlanTool, run_migration: runMigrationTool,
   publish_preview: publishPreviewTool, create_share_link: createShareLinkTool,
-  rollback_release: rollbackReleaseTool, git_commit: gitCommitTool,
+  rollback_release: rollbackReleaseTool,
 };
 
 /** Server-enforced capability matrix. */
 const TOOL_PERMISSIONS: Record<RoleId, string[]> = {
-  team_leader: ["delegate_to_agent", "search_references", "inspect_current_app", "render_preview", "complete_run", "request_user_approval", "create_artifact", "get_artifact", "compare_artifacts", "workspace_get_manifest", "workspace_list_files", "fs_list", "fs_read", "fs_stat", "fs_search", "create_code_snapshot", "restore_code_snapshot", "list_references", "summarize_references", "create_checkpoint", "restore_checkpoint", "create_migration_plan", "run_migration", "publish_preview", "create_share_link", "rollback_release", "git_commit", "git_status", "git_diff"],
+  team_leader: ["delegate_to_agent", "search_references", "inspect_current_app", "render_preview", "complete_run", "request_user_approval", "create_artifact", "get_artifact", "compare_artifacts", "workspace_get_manifest", "workspace_list_files", "fs_list", "fs_read", "fs_stat", "create_code_snapshot", "restore_code_snapshot", "list_references", "summarize_references", "create_checkpoint", "restore_checkpoint", "create_migration_plan", "run_migration", "publish_preview", "create_share_link", "rollback_release"],
   product_manager: ["fs_read", "inspect_current_app", "get_artifact", "workspace_get_manifest"],
   researcher: ["search_references", "open_reference", "extract_reference_content", "search_docs", "search_ui_examples", "search_competitors", "summarize_references", "verify_reference", "save_reference", "list_references"],
-  architect: ["fs_read", "fs_search", "fs_stat", "inspect_current_app", "get_artifact", "create_artifact", "workspace_get_manifest", "workspace_list_files"],
-  engineer: ["workspace_init", "workspace_get_manifest", "workspace_list_files", "fs_list", "fs_read", "fs_write", "fs_patch", "fs_search", "fs_stat", "fs_delete", "fs_create_dir", "fs_copy", "fs_move", "dependency_list", "dependency_add", "dependency_remove", "run_format", "run_lint", "run_typecheck", "run_tests", "run_build", "get_build_errors", "get_test_failures", "security_scan", "create_code_snapshot", "restore_code_snapshot", "sandbox_create", "sandbox_exec", "sandbox_exec_stream", "sandbox_read_logs", "sandbox_kill_process", "sandbox_get_process", "sandbox_reset", "sandbox_export_artifact", "sandbox_network_request", "inspect_current_app", "create_artifact", "get_artifact", "compare_artifacts", "create_checkpoint", "create_patch", "request_user_approval", "seed_demo_data", "create_record", "update_record", "delete_record"],
+  architect: ["bash", "fs_read", "fs_list", "fs_stat", "inspect_current_app", "get_artifact", "create_artifact", "workspace_get_manifest", "workspace_list_files"],
+  engineer: ["bash", "workspace_init", "workspace_get_manifest", "workspace_list_files", "fs_list", "fs_read", "fs_write", "fs_patch", "fs_stat", "fs_delete", "fs_create_dir", "fs_copy", "fs_move", "dependency_list", "dependency_add", "dependency_remove", "run_format", "run_lint", "run_typecheck", "run_tests", "run_build", "get_build_errors", "get_test_failures", "security_scan", "create_code_snapshot", "restore_code_snapshot", "inspect_current_app", "create_artifact", "get_artifact", "compare_artifacts", "create_checkpoint", "request_user_approval", "seed_demo_data", "create_record", "update_record", "delete_record"],
   data_scientist: ["inspect_data_schema", "query_records", "count_records", "aggregate_records", "analyze_project_data", "get_artifact", "create_artifact", "validate_data_access", "create_record", "update_record", "delete_record", "seed_demo_data"],
-  reviewer: ["inspect_current_app", "workspace_get_manifest", "workspace_list_files", "fs_read", "fs_list", "fs_search", "fs_stat", "dependency_list", "run_lint", "run_typecheck", "run_tests", "run_build", "get_build_errors", "get_test_failures", "security_scan", "review_changes", "security_review", "secret_scan", "dependency_audit", "check_data_isolation", "get_artifact", "count_records", "list_references"],
+  reviewer: ["bash", "inspect_current_app", "workspace_get_manifest", "workspace_list_files", "fs_read", "fs_list", "fs_stat", "dependency_list", "run_lint", "run_typecheck", "run_tests", "run_build", "get_build_errors", "get_test_failures", "security_scan", "review_changes", "security_review", "secret_scan", "dependency_audit", "check_data_isolation", "get_artifact", "count_records", "list_references"],
   security_reviewer: ["inspect_current_app", "workspace_get_manifest", "fs_read", "security_scan", "review_changes", "security_review", "secret_scan", "dependency_audit", "check_data_isolation", "get_artifact"],
 };
 

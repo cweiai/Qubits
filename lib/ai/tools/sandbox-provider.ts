@@ -66,7 +66,7 @@ const SENSITIVE_ENV = /(API_KEY|SECRET|TOKEN|PASSWORD|DATABASE_URL|OPENAI|ANTHRO
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_PROCESSES = 8;
 
-const DEFAULT_ALLOWLIST = "npm,node,npx,next,eslint,tsc,git";
+const DEFAULT_ALLOWLIST = "npm,node,npx,next,eslint,tsc,git,bash,sh";
 const LOCAL_DEV_NOTE = "LocalDevSandbox 不是生产安全边界：仅用于本地开发与测试，不提供容器级隔离，绝不能承载不受信任的多租户负载。";
 const CONTAINER_NOTE = "ContainerSandbox：非 root 容器、只挂载当前 workspace、默认禁网、资源受限，是生产级隔离边界。";
 

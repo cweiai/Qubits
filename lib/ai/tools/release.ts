@@ -3,7 +3,6 @@ import { z } from "zod";
 import type { ServerToolDefinition } from "./types";
 import { ToolExecutionError } from "./types";
 import { migrationPlanResultSchema, notConfiguredResultSchema, publishResultSchema } from "./schemas";
-import { assertApproved } from "./approval";
 
 /**
  * P2 release/migration/share tools: NOT_CONFIGURED implementations.
@@ -81,17 +80,3 @@ export const rollbackReleaseTool: ServerToolDefinition<Record<string, never>, { 
   },
 };
 
-export const gitCommitTool: ServerToolDefinition<{ message: string }, { available: false; provider: string; reason: string }> = {
-  name: "git_commit",
-  description: "提交 workspace git（需要审批；未配置凭据时 NOT_CONFIGURED）。",
-  argsSchema: z.object({ message: z.string().min(1).max(200) }),
-  resultSchema: notConfiguredResultSchema,
-  allowedRoles: ["team_leader"],
-  risk: "critical",
-  requiresApproval: true,
-  async execute() {
-    throw new ToolExecutionError("GIT_COMMIT_NOT_CONFIGURED", "未配置 Git 凭据（GIT_COMMIT_ENABLED）", false);
-  },
-};
-
-void assertApproved;

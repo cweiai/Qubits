@@ -8,11 +8,11 @@ import {
   fsCopyArgsSchema, fsCopyResultSchema, fsCreateDirArgsSchema, fsCreateDirResultSchema,
   fsDeleteArgsSchema, fsDeleteResultSchema, fsListArgsSchema, fsListResultSchema,
   fsMoveArgsSchema, fsMoveResultSchema, fsPatchArgsSchema, fsPatchResultSchema,
-  fsReadArgsSchema, fsReadResultSchema, fsSearchArgsSchema, fsSearchResultSchema,
+  fsReadArgsSchema, fsReadResultSchema,
   fsStatArgsSchema, fsStatResultSchema, fsWriteArgsSchema, fsWriteResultSchema,
 } from "./schemas";
 import { WorkspaceError } from "@/lib/workspace/errors";
-import { resolveWorkspacePath, SENSITIVE_FILE } from "@/lib/workspace/paths";
+import { resolveWorkspacePath } from "@/lib/workspace/paths";
 import { systemOwnedNoteFor } from "@/lib/workspace/workspace-manager";
 import { MANIFEST_FILE_NAME, parseManifestText } from "@/lib/contracts/manifest";
 
@@ -154,43 +154,6 @@ export const fsPatchTool: ServerToolDefinition<{ path: string; oldText: string; 
     writeFileSync(full, after, "utf8");
     const replaced = args.replaceAll ? before.split(args.oldText).length - 1 : 1;
     return { path: args.path, replaced, diffSummary: diffSummary(before, after) };
-  },
-};
-
-export const fsSearchTool: ServerToolDefinition<{ pattern: string; glob: string; maxResults: number }, { matches: Array<{ path: string; line: number; text: string }> }> = {
-  name: "fs_search",
-  description: "在 workspace 内按字面量搜索文件内容（搜索根目录即工作区根）。",
-  argsSchema: fsSearchArgsSchema,
-  resultSchema: fsSearchResultSchema,
-  allowedRoles: ["architect", "engineer", "reviewer", "team_leader"],
-  risk: "low",
-  requiresApproval: false,
-  async execute(args, context) {
-    const root = jail(context, ".");
-    const matches: Array<{ path: string; line: number; text: string }> = [];
-    const walk = (current: string, depth: number) => {
-      if (matches.length >= args.maxResults || depth > 6) return;
-      for (const name of readdirSync(current)) {
-        if (name === "node_modules" || name === "dist" || name === ".qubits-trash") continue;
-        const full = path.join(current, name);
-        try {
-          const stat = lstatSync(full);
-          if (stat.isDirectory()) walk(full, depth + 1);
-          else if (stat.isFile() && stat.size <= MAX_FILE_BYTES && !SENSITIVE_FILE.test(name)) {
-            const lines = readFileSync(full, "utf8").split("\n");
-            lines.forEach((line, index) => {
-              if (line.includes(args.pattern) && matches.length < args.maxResults) {
-                matches.push({ path: path.relative(root, full).split(path.sep).join("/"), line: index + 1, text: line.slice(0, 300) });
-              }
-            });
-          }
-        } catch {
-          // ignore
-        }
-      }
-    };
-    walk(root, 1);
-    return { matches };
   },
 };
 

@@ -71,7 +71,7 @@ const REPAIR_HINTS: Record<string, string> = {
   SECURITY_BLOCKED: "静态安全扫描阻断（eval/网络/存储/密钥等），请移除违规代码后重新 build。",
   PREVIEW_BLOCKED: "Reviewer 尚未批准，请先委派 Reviewer 审校并在通过后重试。",
   SEARCH_NOT_CONFIGURED: "参考搜索服务未配置，重试无法解决；请改用其他方式或向迈克报告。",
-  SANDBOX_NOT_CONFIGURED: "沙箱未配置，重试无法解决；请改用其他方式或向迈克报告。",
+  PROVIDER_UNAVAILABLE: "沙盒/构建执行环境不可用，重试无法解决；请改用其他方式或向迈克报告。",
   DATA_NOT_CONFIGURED: "数据服务未配置，重试无法解决；请改用其他方式或向迈克报告。",
   APPROVAL_REQUIRED: "该操作需要用户审批，请等待审批通过后重试，不要反复触发审批。",
   TOOL_BUDGET_EXCEEDED: "调用预算已用尽（对话轮次或子 Agent 数量上限），请基于已有信息直接给出结论或改用其他方式。",
@@ -416,8 +416,8 @@ function summarizeResult(toolName: string, result: unknown): string {
       return "列出 " + len(record.entries) + " 项";
     case "fs_stat":
       return "stat " + str(record.path) + "（" + str(record.type) + " · " + num(record.size) + " 字节）";
-    case "fs_search":
-      return "搜索命中 " + len(record.matches) + " 处";
+    case "bash":
+      return "命令 exitCode=" + num(record.exitCode) + (record.timedOut ? "（超时）" : "") + " · 输出 " + num(str(record.stdout).length) + " 字符";
     case "fs_delete":
       return "已删除 " + str(record.path) + (record.soft ? "（软删除）" : "");
     case "fs_create_dir":
@@ -461,8 +461,6 @@ function summarizeResult(toolName: string, result: unknown): string {
     }
     case "complete_run":
       return "运行已完成";
-    case "sandbox_exec":
-      return "沙盒执行 exitCode=" + num(record.exitCode) + (record.timedOut ? "（超时）" : "");
     case "query_records":
       return "查询到 " + len(record.records) + " 条记录" + (record.truncated ? "（已截断）" : "");
     case "count_records":

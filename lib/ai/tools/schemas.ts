@@ -115,8 +115,6 @@ export const fsWriteArgsSchema = z.object({ path: z.string().min(1).max(400), co
 export const fsWriteResultSchema = z.object({ path: z.string(), bytesWritten: z.number(), diffSummary: z.string().max(400) });
 export const fsPatchArgsSchema = z.object({ path: z.string().min(1).max(400), oldText: z.string().max(20000), newText: z.string().max(20000), replaceAll: z.boolean().default(false) });
 export const fsPatchResultSchema = z.object({ path: z.string(), replaced: z.number().int(), diffSummary: z.string().max(400) });
-export const fsSearchArgsSchema = z.object({ pattern: z.string().min(1).max(200), glob: z.string().max(100).default("**/*"), maxResults: z.number().int().min(1).max(100).default(30) });
-export const fsSearchResultSchema = z.object({ matches: z.array(z.object({ path: z.string(), line: z.number().int(), text: z.string().max(300) })).max(100) });
 export const fsStatArgsSchema = z.object({ path: z.string().min(1).max(400) });
 export const fsStatResultSchema = z.object({ path: z.string(), type: z.enum(["file", "dir"]), size: z.number(), modifiedAt: z.number() });
 export const fsDeleteArgsSchema = z.object({ path: z.string().min(1).max(400), soft: z.boolean().default(true) });
@@ -128,25 +126,9 @@ export const fsCopyResultSchema = z.object({ from: z.string(), to: z.string() })
 export const fsMoveArgsSchema = z.object({ from: z.string().min(1).max(400), to: z.string().min(1).max(400) });
 export const fsMoveResultSchema = z.object({ from: z.string(), to: z.string() });
 
-// ── sandbox ──
-export const sandboxCreateArgsSchema = z.object({ template: z.enum(["empty", "qubits-app"]).default("empty") });
-export const sandboxCreateResultSchema = z.object({ sandboxId: z.string(), provider: z.string(), workspaceDir: z.string(), demoMode: z.boolean() });
-export const sandboxExecArgsSchema = z.object({ command: z.string().min(1).max(60), args: z.array(z.string().max(200)).max(30).default([]), cwd: z.string().max(300).default(""), timeoutMs: z.number().int().min(1000).max(120000).default(60000) });
-export const sandboxExecResultSchema = z.object({ exitCode: z.number().int(), stdout: z.string().max(30000), stderr: z.string().max(10000), timedOut: z.boolean(), durationMs: z.number().int() });
-export const sandboxStreamArgsSchema = sandboxExecArgsSchema;
-export const sandboxStreamResultSchema = z.object({ streamId: z.string(), exitCode: z.number().int(), timedOut: z.boolean() });
-export const sandboxReadLogsArgsSchema = z.object({ streamId: z.string().min(1).max(64), maxBytes: z.number().int().min(100).max(30000).default(8000) });
-export const sandboxReadLogsResultSchema = z.object({ streamId: z.string(), logs: z.string().max(30000) });
-export const sandboxKillArgsSchema = z.object({ pid: z.number().int().positive() });
-export const sandboxKillResultSchema = z.object({ pid: z.number().int(), killed: z.boolean() });
-export const sandboxResetArgsSchema = z.object({ preserve: z.array(z.string().max(200)).max(20).default([]) });
-export const sandboxResetResultSchema = z.object({ reset: z.literal(true) });
-export const sandboxGetProcessArgsSchema = z.object({ pid: z.number().int().positive() });
-export const sandboxGetProcessResultSchema = z.object({ pid: z.number().int(), alive: z.boolean(), command: z.string().max(120) });
-export const sandboxExportArgsSchema = z.object({ path: z.string().min(1).max(400) });
-export const sandboxExportResultSchema = z.object({ artifactId: z.string(), bytes: z.number() });
-export const sandboxNetworkArgsSchema = z.object({ url: z.string().min(1).max(500), method: z.enum(["GET", "POST"]).default("GET"), maxBytes: z.number().int().min(100).max(65536).default(16384) });
-export const sandboxNetworkResultSchema = z.object({ status: z.number().int(), body: z.string().max(70000) });
+// ── bash ──
+export const bashArgsSchema = z.object({ command: z.string().min(1).max(2000), timeoutMs: z.number().int().min(1000).max(120000).default(60000) });
+export const bashResultSchema = z.object({ exitCode: z.number().int(), stdout: z.string().max(30000), stderr: z.string().max(10000), timedOut: z.boolean(), durationMs: z.number().int() });
 
 // ── build checks ──
 export const runCommandArgsSchema = z.object({ cwd: z.string().max(300).default(""), timeoutMs: z.number().int().min(1000).max(300000).default(120000) });
