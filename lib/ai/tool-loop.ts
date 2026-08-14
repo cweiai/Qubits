@@ -13,13 +13,13 @@ import { isAbortLike } from "@/lib/workspace/errors";
 /**
  * Centralized tool-calling agent loop:
  * - every provider round trip has a timeout/AbortSignal;
- * - max 20 rounds per agent (no global tool-call count limit);
+ * - max 80 rounds per agent (no global tool-call count limit);
  * - tool results are fed back to the same message as role:tool + tool_call_id;
  * - final text must pass the corresponding Zod schema;
  * - when the model makes no tool call but one is required, return TOOL_CALL_REQUIRED (never fake tool events).
  */
 
-const MAX_ROUNDS = 20;
+const MAX_ROUNDS = 80;
 const TOOL_REQUIRED_CODE = "TOOL_CALL_REQUIRED";
 
 export class ToolLoopError extends Error {
@@ -351,7 +351,7 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
     }
     messages.push({ role: "user", content: "你的输出不是合法 JSON：" + extracted.error.slice(0, 200) + "。请重新输出。" });
   }
-  throw new ToolLoopError("TOOL_BUDGET_EXCEEDED", "该 Agent 的对话轮次超出预算（20）");
+  throw new ToolLoopError("TOOL_BUDGET_EXCEEDED", "该 Agent 的对话轮次超出预算（" + MAX_ROUNDS + "）");
 }
 
 function parseToolArgs(call: ToolCall): unknown {
