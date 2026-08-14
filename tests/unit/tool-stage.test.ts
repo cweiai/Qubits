@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   activeToolStage,
   groupToolEvents,
+  stageGroupStatus,
   toolEventStage,
   TOOL_STAGE_LABELS,
   TOOL_STAGE_ORDER,
@@ -81,6 +82,30 @@ describe("groupToolEvents 分组", () => {
     for (const stage of TOOL_STAGE_ORDER) {
       expect(TOOL_STAGE_LABELS[stage]).toBeTruthy();
     }
+  });
+});
+
+describe("stageGroupStatus 块状态", () => {
+  const makeEvent = (status: ToolEventView["status"]): ToolEventView => ({
+    toolCallId: "tc-" + status,
+    agentRunId: "agent-1",
+    roleId: "engineer",
+    toolName: "fs_write",
+    status,
+    inputSummary: "",
+    resultSummary: "",
+    errorCode: null,
+    timestamp: 1,
+  });
+
+  it("活动阶段永远是 running——即使块内工具调用已全部 success", () => {
+    expect(stageGroupStatus([makeEvent("success"), makeEvent("success")], true)).toBe("running");
+  });
+
+  it("非活动阶段按工具状态聚合：failed > running > success", () => {
+    expect(stageGroupStatus([makeEvent("success"), makeEvent("failed")], false)).toBe("failed");
+    expect(stageGroupStatus([makeEvent("success"), makeEvent("running")], false)).toBe("running");
+    expect(stageGroupStatus([makeEvent("success")], false)).toBe("success");
   });
 });
 

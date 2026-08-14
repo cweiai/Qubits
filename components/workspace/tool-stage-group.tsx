@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, ChevronDown, ChevronRight, Layers, Loader2, X } from "lucide-react";
-import { TOOL_STAGE_LABELS, type ToolStageGroupView } from "@/lib/workspace/message-view";
+import { stageGroupStatus, TOOL_STAGE_LABELS, type ToolStageGroupView } from "@/lib/workspace/message-view";
 import { ToolCallCard } from "./tool-call-card";
 import { cn } from "@/lib/utils";
 
@@ -11,24 +11,27 @@ import { cn } from "@/lib/utils";
  */
 export function ToolStageGroup({
   group,
+  active,
   expanded,
   onToggle,
 }: {
   group: ToolStageGroupView;
+  /** True while this block is the currently running pipeline stage. */
+  active: boolean;
   expanded: boolean;
   onToggle(): void;
 }) {
-  const hasRunning = group.events.some((event) => event.status === "running");
-  const hasFailed = group.events.some((event) => event.status === "failed");
+  const status = stageGroupStatus(group.events, active);
 
   return (
     <div
       className={cn(
         "overflow-hidden rounded-md border bg-white",
-        hasFailed ? "border-red-200" : "border-zinc-200"
+        status === "failed" ? "border-red-200" : "border-zinc-200"
       )}
       data-testid="tool-stage-group"
       data-stage={group.stage}
+      data-status={status}
     >
       <button
         type="button"
@@ -40,16 +43,16 @@ export function ToolStageGroup({
         <span
           className={cn(
             "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
-            hasFailed
+            status === "failed"
               ? "bg-red-50 text-red-600"
-              : hasRunning
+              : status === "running"
                 ? "bg-amber-50 text-amber-600"
                 : "bg-emerald-50 text-emerald-700"
           )}
         >
-          {hasRunning ? (
+          {status === "running" ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : hasFailed ? (
+          ) : status === "failed" ? (
             <X className="h-3.5 w-3.5" />
           ) : (
             <Check className="h-3.5 w-3.5" />

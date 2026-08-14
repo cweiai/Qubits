@@ -111,6 +111,7 @@ export function ConversationPanel() {
             <ToolStageGroup
               key={item.key}
               group={item.group}
+              active={item.key === activeKey}
               expanded={expandedStages.has(item.key)}
               onToggle={() => toggleStage(item.key)}
             />

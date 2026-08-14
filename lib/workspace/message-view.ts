@@ -151,6 +151,20 @@ export function groupToolEvents(events: ToolEventView[]): ToolStageGroupView[] {
   }));
 }
 
+export type StageGroupStatus = "running" | "failed" | "success";
+
+/**
+ * Aggregate status of a stage block. The currently active stage stays "running" even
+ * while the model thinks between tool calls (all its tool events may already be
+ * success) — a green check must never appear before the stage is finished.
+ */
+export function stageGroupStatus(events: ToolEventView[], active: boolean): StageGroupStatus {
+  if (active) return "running";
+  if (events.some((event) => event.status === "failed")) return "failed";
+  if (events.some((event) => event.status === "running")) return "running";
+  return "success";
+}
+
 function parseRoleState(value: unknown): RoleState {
   if (typeof value !== "object" || value === null) {
     return { status: "pending", summary: null, startedAt: null, completedAt: null };
