@@ -294,6 +294,18 @@ async function attemptChatWithTools(input: GenerateWithToolsInput): Promise<Agen
   try {
     let response: Response;
     try {
+      // Controller tool choice: force_final → no tools + tool_choice:none;
+      // force_next_tool → only the named tool + forced function; otherwise auto.
+      const choice = input.toolChoice ?? { mode: "auto" as const };
+      let exposedTools = input.tools.map((tool) => ({ type: "function", function: tool }));
+      let toolChoiceField: unknown = "auto";
+      if (choice.mode === "none") {
+        exposedTools = [];
+        toolChoiceField = "none";
+      } else if (choice.mode === "function") {
+        exposedTools = input.tools.filter((tool) => tool.name === choice.name).map((tool) => ({ type: "function", function: tool }));
+        toolChoiceField = { type: "function", function: { name: choice.name } };
+      }
       response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
@@ -301,8 +313,8 @@ async function attemptChatWithTools(input: GenerateWithToolsInput): Promise<Agen
           model,
           temperature: 0.2,
           max_tokens: 4096,
-          tools: input.tools.map((tool) => ({ type: "function", function: tool })),
-          tool_choice: "auto",
+          tools: exposedTools,
+          tool_choice: toolChoiceField,
           messages: buildChatMessages(input.system, input.messages, toolMessageCompatEnabled()),
         }),
         signal: controller.signal,

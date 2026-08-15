@@ -109,7 +109,7 @@ function errorCodes(events: AgentEvent[]): (string | undefined)[] {
 }
 
 describe("工具失败后的自我纠错", () => {
-  it("绝对路径失败：纠错消息包含违规参数与相对路径建议，原样重试被快速拒绝", async () => {
+  it("绝对路径失败：纠错消息包含违规参数与相对路径建议，原样重试被 REPEATED_FAILED_CALL 拦截", async () => {
     process.env.QUIBITS_MAX_TOOL_FAILURES = "2";
     const events: AgentEvent[] = [];
     const seen: ChatMessage[][] = [];
@@ -126,13 +126,15 @@ describe("工具失败后的自我纠错", () => {
         providerOverride: repeatingProvider(seen, ABS_CALL),
       })
     ).rejects.toThrowError(/连续失败 3 次/);
-    // First real execution reports PATH_ESCAPE; the next two verbatim retries are fast-rejected without executing.
-    expect(errorCodes(events)).toEqual(["PATH_ESCAPE", "REPEATED_CALL", "REPEATED_CALL"]);
-    // Second request: role:tool result carries the repair hint; the correction user message carries the last args and the relative-path guidance.
+    // First real execution reports PATH_ESCAPE; verbatim retries are skipped as REPEATED_FAILED_CALL (never re-executed).
+    expect(errorCodes(events)).toEqual(["PATH_ESCAPE", "REPEATED_FAILED_CALL", "REPEATED_FAILED_CALL"]);
+    // The first retry round's role:tool result (last tool message of the third request) carries REPEATED_FAILED_CALL.
+    const third = seen[2] ?? [];
+    const toolMsgs = third.filter((m) => m.role === "tool") as { content: string }[];
+    const toolMsg = toolMsgs[toolMsgs.length - 1];
+    expect(toolMsg?.content).toContain("REPEATED_FAILED_CALL");
+    expect(toolMsg?.content).toContain("修复参数");
     const second = seen[1] ?? [];
-    const toolMsg = second.find((m) => m.role === "tool") as { content: string } | undefined;
-    expect(toolMsg?.content).toContain("PATH_ESCAPE");
-    expect(toolMsg?.content).toContain("相对路径");
     const userMsgs = second.filter((m) => m.role === "user" && typeof m.content === "string") as { content: string }[];
     const correction = userMsgs[userMsgs.length - 1].content;
     expect(correction).toContain("fs_read");
@@ -166,7 +168,7 @@ describe("工具失败后的自我纠错", () => {
     expect(errorCodes(events)).toEqual(["APPROVAL_REQUIRED", "APPROVAL_REQUIRED", "APPROVAL_REQUIRED"]);
   });
 
-  it("成功调用清空上次失败记录：间隔成功后相同绝对路径会再次真实执行", async () => {
+  it("失败历史跨成功保留：间隔成功后相同失败调用不再真实执行（REPEATED_FAILED_CALL）", async () => {
     process.env.QUIBITS_MAX_TOOL_FAILURES = "4";
     const events: AgentEvent[] = [];
     const seen: ChatMessage[][] = [];
@@ -205,11 +207,12 @@ describe("工具失败后的自我纠错", () => {
     });
     expect(result.status).toBe("completed");
     const results = events.filter((e) => e.type === "tool_result");
-    // Round 1: real PATH_ESCAPE execution; round 2: success (clears the failure record); round 3: same absolute path really executes again (not misclassified as a repeat).
+    // Round 1: real PATH_ESCAPE execution; round 2: real success; round 3: the identical
+    // failure is NOT re-executed — the bounded history remembers it across the success.
     expect(results).toHaveLength(3);
     expect((results[0] as { errorCode?: string }).errorCode).toBe("PATH_ESCAPE");
     expect((results[1] as { errorCode?: string }).errorCode).toBeUndefined();
-    expect((results[2] as { errorCode?: string }).errorCode).toBe("PATH_ESCAPE");
+    expect((results[2] as { errorCode?: string }).errorCode).toBe("REPEATED_FAILED_CALL");
     // The successful read was real and its summary is the human-readable form.
     expect((results[1] as { resultSummary: string }).resultSummary).toContain("读取 src/a.txt");
     // Verify the read really happened at the filesystem level.

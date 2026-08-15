@@ -81,7 +81,11 @@ export function ToolCallCard({ event }: { event: ToolEventView }) {
           ) : event.status === "failed" ? (
             <p className="mt-0.5 text-xs text-red-600" title={summary}>
               {summary}
-              {event.errorCode ? <span className="ml-1 shrink-0 text-red-400">({event.errorCode})</span> : null}
+              {event.errorCode ? (
+                <span className="ml-1 shrink-0 text-red-400">
+                  {CONTROLLER_ERROR_LABELS[event.errorCode] ? "（" + CONTROLLER_ERROR_LABELS[event.errorCode] + "）" : "(" + event.errorCode + ")"}
+                </span>
+              ) : null}
             </p>
           ) : (
             <p className="mt-0.5 truncate text-xs text-muted-foreground" title={summary}>
@@ -239,6 +243,14 @@ const TOOL_ICONS: Record<string, typeof Wrench> = {
   update_record: Database,
   delete_record: Database,
   seed_demo_data: Database,
+};
+
+/** Friendly labels for Controller-level tool error codes (no-progress semantics). */
+const CONTROLLER_ERROR_LABELS: Record<string, string> = {
+  REPEATED_FAILED_CALL: "重复失败调用",
+  DUPLICATE_OBSERVATION: "重复观察",
+  NO_PROGRESS: "无进展",
+  CONTROLLER_DIRECTIVE: "控制器指令",
 };
 
 const TOOL_LABELS: Record<string, string> = {

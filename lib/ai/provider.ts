@@ -32,12 +32,25 @@ export interface ToolSpec {
   parameters: Record<string, unknown>;
 }
 
+/**
+ * Controller tool choice per round:
+ * - auto: the provider may call any exposed tool or return text;
+ * - none (force_final): no tools are exposed — the model must emit the final output;
+ * - function (force_next_tool): only the named tool is exposed and forced.
+ */
+export type ToolChoiceSpec =
+  | { mode: "auto" }
+  | { mode: "none" }
+  | { mode: "function"; name: string };
+
 export interface GenerateWithToolsInput {
   system: string;
   messages: ChatMessage[];
   tools: ToolSpec[];
   roleId: RoleId;
   signal?: AbortSignal;
+  /** Controller directive for this round (defaults to auto). */
+  toolChoice?: ToolChoiceSpec;
 }
 
 export interface AgentTurnResponse {

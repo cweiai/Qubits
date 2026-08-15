@@ -90,7 +90,7 @@ afterAll(() => {
 });
 
 describe("收敛控制（FakeProvider）", () => {
-  it("重复成功调用触发循环保护：第三次起 REPEATED_CALL，随后失败阈值终止 Agent", async () => {
+  it("重复成功调用：相同观察触发 DUPLICATE_OBSERVATION 并禁用工具，最终由轮次预算终止", async () => {
     const events: AgentEvent[] = [];
     const context = engineerContext(events);
     const provider = loopingProvider(() => ({
@@ -108,10 +108,12 @@ describe("收敛控制（FakeProvider）", () => {
         requireToolCall: false,
         providerOverride: provider,
       })
-    ).rejects.toSatisfy((error: unknown) => error instanceof ToolLoopError && (error as ToolLoopError).code === "TOOL_FAILURE_LIMIT_EXCEEDED");
-    // The loop guard fired: a REPEATED_CALL result was emitted for an identical SUCCESSFUL call.
-    expect(events.some((e) => e.type === "tool_result" && e.errorCode === "REPEATED_CALL")).toBe(true);
-    // The file was written at most REPEAT_SUCCESS_LIMIT times (real execution stops).
+    ).rejects.toSatisfy((error: unknown) => error instanceof ToolLoopError && (error as ToolLoopError).code === "AGENT_TOOL_BUDGET_EXCEEDED");
+    // The loop guard fired with the new semantic codes — NOT the failure threshold.
+    expect(events.some((e) => e.type === "tool_result" && e.errorCode === "DUPLICATE_OBSERVATION")).toBe(true);
+    expect(events.some((e) => e.type === "tool_result" && e.errorCode === "CONTROLLER_DIRECTIVE")).toBe(true);
+    expect(events.some((e) => e.type === "error" && e.code === "TOOL_FAILURE_LIMIT_EXCEEDED")).toBe(false);
+    // The file was written at most OBSERVATION_REPEAT_LIMIT times (real execution stops early).
     expect(existsSync(path.join(workspace, "loop.txt"))).toBe(true);
   });
 
