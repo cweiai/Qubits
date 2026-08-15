@@ -245,7 +245,7 @@ async function buildAppLocked(workspaceDir: string): Promise<BuildAppResult> {
       "<style>" + css + "</style>",
       "</head>",
       "<body>",
-      '<div id="qubits-root"></div>',
+      '<div id="qubits-root"></div><div id="root"></div>',
       "<script>" + js + "</script>",
       "</body>",
       "</html>",

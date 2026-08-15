@@ -108,6 +108,7 @@ describe("工作区初始化（系统骨架，无模板）", () => {
     expect(result.report.status).toBe("success");
     expect(result.bundle).not.toBeNull();
     expect(result.bundle!.html).toContain("qubits-root");
+    expect(result.bundle!.html).toContain('id="root"');
     expect(result.bundle!.html).toContain("Content-Security-Policy");
     expect(result.bundle!.bytes).toBeGreaterThan(1000);
     // Real artifacts on disk.

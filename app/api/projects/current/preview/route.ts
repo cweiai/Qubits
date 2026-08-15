@@ -32,6 +32,24 @@ function previewHtmlFromArtifact(content: string): string | null {
   return trimmed;
 }
 
+function ensurePreviewMountNodes(html: string): string {
+  const hasQubitsRoot = /\bid=["']qubits-root["']/i.test(html);
+  const hasRoot = /\bid=["']root["']/i.test(html);
+  const missing = [
+    hasQubitsRoot ? "" : '<div id="qubits-root"></div>',
+    hasRoot ? "" : '<div id="root"></div>',
+  ].join("");
+  if (!missing) return html;
+  const bodyOpen = html.match(/<body(?:\s[^>]*)?>/i);
+  if (bodyOpen?.index != null) {
+    const insertAt = bodyOpen.index + bodyOpen[0].length;
+    return html.slice(0, insertAt) + missing + html.slice(insertAt);
+  }
+  const firstScript = html.search(/<script(?:\s[^>]*)?>/i);
+  if (firstScript !== -1) return html.slice(0, firstScript) + missing + html.slice(firstScript);
+  return missing + html;
+}
+
 /**
  * Safari/WebKit rejects `window.postMessage(message)` calls with a missing/invalid
  * targetOrigin (`SyntaxError: The string did not match the expected pattern.`).
@@ -92,7 +110,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     if (!html) {
       throw new ApiError("PREVIEW_NOT_AVAILABLE", "预览产物内容缺失或已损坏，请重新生成", 404);
     }
-    return new NextResponse(injectPostMessageGuard(html), {
+    return new NextResponse(injectPostMessageGuard(ensurePreviewMountNodes(html)), {
       status: 200,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
