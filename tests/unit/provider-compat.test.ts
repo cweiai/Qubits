@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertValidToolMessageSequence,
   buildChatMessages,
+  buildToolRequestFields,
   parseProviderToolCalls,
   ToolMessageProtocolError,
 } from "@/lib/ai/openai-provider";
@@ -25,6 +26,28 @@ function validToolRound(): ChatMessage[] {
 }
 
 describe("OpenAI Tool Calling 消息协议", () => {
+  it("控制器只发送合法的工具字段，final-only 轮次省略空 tools", () => {
+    const tool = { name: "inspect_current_app", description: "inspect", parameters: { type: "object" } };
+    const base = {
+      system: "sys",
+      messages: [{ role: "user" as const, content: "hello" }],
+      tools: [tool],
+      roleId: "team_leader" as const,
+    };
+
+    expect(buildToolRequestFields({ ...base, tools: [], toolChoice: { mode: "none" } })).toEqual({});
+    expect(buildToolRequestFields({ ...base, toolChoice: { mode: "auto" } })).toEqual({
+      tools: [{ type: "function", function: tool }],
+      tool_choice: "auto",
+    });
+    expect(buildToolRequestFields({ ...base, toolChoice: { mode: "function", name: tool.name } })).toEqual({
+      tools: [{ type: "function", function: tool }],
+      tool_choice: { type: "function", function: { name: tool.name } },
+    });
+    expect(() => buildToolRequestFields({ ...base, toolChoice: { mode: "function", name: "missing" } }))
+      .toThrowError(ToolMessageProtocolError);
+  });
+
   it("标准模式输出完整的 type:function，并保留连续的一对一 tool 结果", () => {
     const out = buildChatMessages("sys", validToolRound(), false);
     expect(out[0]).toEqual({ role: "system", content: "sys" });

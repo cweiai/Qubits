@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import { executeTool, getToolDefinition, getToolNamesForRole, listToolNames } from "@/lib/ai/tools/registry";
+import { executeTool, getToolDefinition, getToolEffect, getToolNamesForRole, listToolNames } from "@/lib/ai/tools/registry";
 import { ArtifactStore } from "@/lib/ai/artifact-store";
 import { resetApprovalsForTests } from "@/lib/ai/tools/approval";
 import { ContainerSandboxProvider } from "@/lib/ai/tools/sandbox-provider";
@@ -63,6 +63,7 @@ describe("Registry 与权限", () => {
       expect(def!.argsSchema).toBeTruthy();
       expect(def!.resultSchema).toBeTruthy();
       expect(def!.risk).toBeTruthy();
+      expect(["observation", "action"]).toContain(getToolEffect(name));
     }
   });
 
@@ -74,7 +75,7 @@ describe("Registry 与权限", () => {
     expect(getToolNamesForRole("engineer")).toContain("bash");
     expect(getToolNamesForRole("reviewer")).toContain("bash");
     expect(getToolNamesForRole("reviewer")).toContain("secret_scan");
-    // Architect: design-only — no bash, no fs tools, no create_artifact, no workspace_get_manifest.
+    // The architect remains design-only with no workspace mutation tools.
     expect(getToolNamesForRole("architect")).not.toContain("bash");
     expect(getToolNamesForRole("architect")).not.toContain("fs_read");
     expect(getToolNamesForRole("architect")).not.toContain("fs_list");

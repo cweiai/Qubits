@@ -1,10 +1,11 @@
 import "server-only";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { AgentTurnResponse, AIProvider, ChatMessage, ToolCall, ToolChoiceSpec, ToolSpec } from "./provider";
 import { getProvider } from "./provider";
 import type { RoleId } from "@/lib/contracts/agent-events";
-import { getToolDefinition, getToolDefinitionsForRole, executeTool, ToolExecutionError } from "./tools/registry";
+import { getToolDefinition, getToolDefinitionsForRole, getToolEffect, executeTool, ToolExecutionError } from "./tools/registry";
 import { createApproval, isApproved } from "./tools/approval";
 import type { ToolExecutionContext } from "./tools/types";
 import { isToolError } from "./tools/references";
@@ -13,13 +14,13 @@ import { isAbortLike } from "@/lib/workspace/errors";
 /**
  * Centralized tool-calling agent loop.
  *
- * The Controller (this module) — not the prompt — decides what the model may do next:
+ * The Controller, not the prompt, decides what the model may do next:
  * - every provider round trip has a timeout/AbortSignal and per-role budgets
  *   (rounds / tool calls / total deadline);
  * - every successful observation is fingerprinted (semantic args + normalized result
  *   digest + state version) into a bounded history; identical observations, even with
  *   different arguments, are recognized as DUPLICATE_OBSERVATION and the tool is
- *   gated — never "please change arguments and retry";
+ *   gated without retry advice;
  * - identical failed calls become REPEATED_FAILED_CALL (execution skipped; fixable
  *   errors may still be retried with different arguments);
  * - A-B-A-B alternations and other non-progressing loops trigger NO_PROGRESS, and the
@@ -28,8 +29,6 @@ import { isAbortLike } from "@/lib/workspace/errors";
  * - tool results and Controller instructions are separate: the role:"tool" message
  *   only explains what happened; a following user message carries the directive.
  */
-
-// ── budgets ──
 
 interface RoleBudget {
   maxRounds: number;
@@ -75,7 +74,6 @@ export function readMaxToolFailures(): number {
 
 const TOOL_REQUIRED_CODE = "TOOL_CALL_REQUIRED";
 /** How many executions of the same observation digest are allowed before it becomes DUPLICATE_OBSERVATION. */
-const OBSERVATION_REPEAT_LIMIT = 2;
 const HISTORY_LIMIT = 32;
 
 export class ToolLoopError extends Error {
@@ -86,8 +84,6 @@ export class ToolLoopError extends Error {
     this.code = code;
   }
 }
-
-// ── semantic fingerprints ──
 
 /** Deterministic canonical JSON: object keys sorted recursively (order-independent). */
 export function canonicalizeJson(value: unknown): unknown {
@@ -108,6 +104,10 @@ function canonicalKey(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function resultDigest(value: unknown): string {
+  return createHash("sha256").update(canonicalKey(normalizeResultForDigest(value))).digest("hex");
 }
 
 /** Volatile metadata that must never make two identical observations look different. */
@@ -132,7 +132,7 @@ function normalizeResultForDigest(value: unknown): unknown {
 /**
  * Semantic args: argument dimensions that cannot change the observation are dropped.
  * For inspect_current_app without an existing app, includeRecords/includeSchema have
- * no meaning — (false,true), (true,true) and (true,false) are ONE observation.
+ * no meaning, so all flag combinations represent one observation.
  */
 function semanticArgsFor(toolName: string, args: unknown, state: StateVersion): unknown {
   if (toolName === "inspect_current_app" && !state.appPresent) {
@@ -181,15 +181,24 @@ function observationIdentity(record: ObservationFingerprint): string {
   return record.name + "|" + record.stateKey + "|" + (record.ok ? "ok:" + record.resultDigest : "err:" + (record.errorCode ?? "TOOL_ERROR"));
 }
 
-/** A-B-A-B alternation over the recent window = no progress. */
+/** Detect an alternating loop among successful observation tools. */
 function detectNoProgress(history: ObservationRecord[]): boolean {
-  const last = history.slice(-4);
+  const last = history
+    .filter((record) => record.ok && getToolEffect(record.name) === "observation")
+    .slice(-4);
   if (last.length < 4) return false;
   const [a, b, c, d] = last.map((record) => observationIdentity(record));
   return a === c && b === d && a !== b;
 }
 
-// ── Controller directives ──
+function isAlternatingPrefix(history: ObservationRecord[]): boolean {
+  const last = history
+    .filter((record) => record.ok && getToolEffect(record.name) === "observation")
+    .slice(-3);
+  if (last.length < 3) return false;
+  const [a, b, c] = last.map((record) => observationIdentity(record));
+  return a === c && a !== b;
+}
 
 type ControllerDirective =
   | { kind: "auto" }
@@ -228,9 +237,7 @@ function noProgressPolicy(roleId: RoleId): ControllerDirective | "gate" {
   }
 }
 
-// ── feedback categories ──
-
-/** Codes that must NEVER receive "修改参数后重试" feedback. */
+/** Codes that must never receive retry advice. */
 const NO_RETRY_CODES = new Set([
   "DUPLICATE_OBSERVATION",
   "NO_PROGRESS",
@@ -249,7 +256,7 @@ const NO_RETRY_CODES = new Set([
   "REPEATED_CALL",
 ]);
 
-/** Common tool error codes → model-facing repair suggestions (only for fixable errors). */
+/** Model-facing repair suggestions for fixable tool errors. */
 const REPAIR_HINTS: Record<string, string> = {
   PATH_ESCAPE: "文件工具只接受工作区内的相对路径（禁止以 / 开头的绝对路径与 ../），可先用 fs_list 查看目录结构。",
   INVALID_PATH: "路径格式不合法，请改用工作区内的相对路径。",
@@ -364,14 +371,6 @@ function toolSpecsFor(roleId: RoleId, exclude: Set<string>): ToolSpec[] {
     }));
 }
 
-/** Tools whose success mutates system state (bumps the local state revision). */
-const MUTATING_TOOLS = new Set([
-  "workspace_init", "fs_write", "fs_patch", "fs_delete", "fs_create_dir", "fs_copy", "fs_move",
-  "dependency_add", "dependency_remove", "run_format", "create_record", "update_record",
-  "delete_record", "seed_demo_data", "run_build", "create_checkpoint", "restore_checkpoint",
-  "create_code_snapshot", "restore_code_snapshot",
-]);
-
 export async function runToolCallingAgent(input: RunAgentInput): Promise<ValidatedAgentResult> {
   const provider = input.providerOverride ?? getProvider();
   const maxToolFailures = readMaxToolFailures();
@@ -383,12 +382,15 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
   let consecutiveFailures = 0;
   let totalFailures = 0;
 
-  // Controller state
+  // Controller state is scoped to one agent run.
   let revision = 0;
   let directive: ControllerDirective = { kind: "auto" };
   const history: ObservationRecord[] = [];
-  /** Per stateVersion cache: repeated inspect_current_app is served from here, never re-executed. */
-  const inspectCache = new Map<string, { result: unknown; stateKey: string }>();
+  const observationCache = new Map<string, {
+    result: unknown;
+    artifactIds: string[];
+    summary: string;
+  }>();
   /** Tools gated for the current state version (proven to yield no new information). */
   const gates = new Map<string, string>();
 
@@ -415,7 +417,7 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
     for (const [name, gatedAt] of gates) {
       if (gatedAt === state.key) gatedNames.add(name);
     }
-    // Expose tools per the Controller directive: force_final → none; force_next_tool → only the forced tool.
+    // Expose no tools for force_final and one tool for force_next_tool.
     let exposedNames: Set<string> | null = null;
     if (directive.kind === "force_next_tool") exposedNames = new Set([directive.name]);
     else if (directive.kind === "force_final") exposedNames = new Set();
@@ -454,9 +456,10 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
       messages.push(assistantMessage);
       const toolResults: ChatMessage[] = [];
       const failureInstructions: string[] = [];
-      let sawDuplicate = false;
+      const duplicateTools = new Set<string>();
+      const noProgressTools = new Set<string>();
       let sawGatedCall = false;
-      /** Tools that really executed successfully in this batch (for force_next_tool reset). */
+      // Successful forced actions return the controller to normal routing.
       const batchSucceeded = new Set<string>();
       for (const call of calls) {
         input.context.counters.toolCalls += 1;
@@ -476,10 +479,13 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
           inputSummary: summarizeArgs(call),
         });
         const semanticKey = semanticArgsKeyFor(call.name, call.rawArguments, state);
+        const effect = getToolEffect(call.name);
+        const cacheStateKey = call.name === "inspect_current_app" ? state.appKey : state.key;
+        const cacheKey = call.name + "|" + cacheStateKey + "|" + semanticKey;
         const startedAt = Date.now();
         let outcome: { ok: boolean; result: unknown; summary: string; errorCode?: string; artifactIds: string[]; durationMs: number };
 
-        // 1) Controller gates: a tool proven to yield no new information for this state.
+        // A gated observation already proved it cannot add information for this state.
         if (gates.get(call.name) === state.key) {
           sawGatedCall = true;
           outcome = {
@@ -491,7 +497,7 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
             durationMs: 0,
           };
         }
-        // 2) Directive mismatch: force_final → no tools; force_next_tool → only the forced tool.
+        // Provider output is still validated if a compatible backend ignores tool choice.
         else if (directive.kind === "force_final" || (directive.kind === "force_next_tool" && directive.name !== call.name)) {
           outcome = {
             ok: false,
@@ -504,59 +510,72 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
             durationMs: 0,
           };
         }
-        // 4) DUPLICATE_OBSERVATION cache for inspect_current_app: cached per app-state
-        // version, never re-executed; switching includeRecords/includeSchema cannot bypass it.
-        else if (call.name === "inspect_current_app") {
-          const cached = inspectCache.get(state.appKey);
-          if (cached) {
-            sawDuplicate = true;
-            outcome = {
-              ok: false,
-              result: cached.result,
-              summary: "当前应用状态自上次检查后未发生变化，重复检查不会产生新信息。此调用未执行，请执行下一步。",
-              errorCode: "DUPLICATE_OBSERVATION",
-              artifactIds: [],
-              durationMs: 0,
-            };
-          } else {
-            outcome = await executeCall(call, input, toolCallId, startedAt, state, semanticKey, history);
-            if (outcome.ok) inspectCache.set(state.appKey, { result: outcome.result, stateKey: state.key });
-          }
+        // Exact observation replays use cached data and still participate in loop detection.
+        else if (effect === "observation" && observationCache.has(cacheKey)) {
+          const cached = observationCache.get(cacheKey)!;
+          outcome = {
+            ok: true,
+            result: cached.result,
+            summary: cached.summary,
+            artifactIds: cached.artifactIds,
+            durationMs: 0,
+          };
         } else {
-          outcome = await executeCall(call, input, toolCallId, startedAt, state, semanticKey, history);
+          outcome = await executeCall(call, input, toolCallId, startedAt, state.key, semanticKey, history);
         }
 
-        // Duplicate successful observation (same digest for this app state), beyond the allowed repeats.
-        if (outcome.ok && outcome.errorCode === undefined) {
+        if (outcome.ok && effect === "observation") {
+          const digest = resultDigest(outcome.result);
           const fingerprint: ObservationFingerprint = {
             name: call.name,
             semanticArgsKey: semanticKey,
-            resultDigest: canonicalKey(normalizeResultForDigest(outcome.result)),
-            stateKey: state.appKey,
+            resultDigest: digest,
+            stateKey: cacheStateKey,
             ok: true,
             errorCode: null,
           };
-          const repeats = history.filter((record) => observationIdentity(record) === observationIdentity(fingerprint)).length;
-          if (repeats >= OBSERVATION_REPEAT_LIMIT) {
-            sawDuplicate = true;
+          const sameResult = history.some(
+            (record) => record.ok && observationIdentity(record) === observationIdentity(fingerprint)
+          );
+          observationCache.set(cacheKey, {
+            result: outcome.result,
+            artifactIds: outcome.artifactIds,
+            summary: outcome.summary,
+          });
+          pushHistory({ ...fingerprint, at: Date.now() });
+          if (detectNoProgress(history)) {
+            for (const record of history.filter((record) => record.ok).slice(-4)) {
+              noProgressTools.add(record.name);
+            }
             outcome = {
               ok: false,
               result: outcome.result,
-              summary: "当前状态自上次检查后未发生变化，重复调用不会产生新信息。此调用已跳过，请执行下一步或输出最终结果。",
+              summary: "检测到交替重复且没有状态推进的工具循环。相关观察工具将被禁用，请执行真正不同的下一步。",
+              errorCode: "NO_PROGRESS",
+              artifactIds: outcome.artifactIds,
+              durationMs: outcome.durationMs,
+            };
+          } else if (sameResult && !isAlternatingPrefix(history)) {
+            duplicateTools.add(call.name);
+            outcome = {
+              ok: false,
+              result: outcome.result,
+              summary: "本次调用返回了与当前状态下已有观察相同的信息。该工具不会继续产生新信息，请执行下一步。",
               errorCode: "DUPLICATE_OBSERVATION",
-              artifactIds: [],
-              durationMs: 0,
+              artifactIds: outcome.artifactIds,
+              durationMs: outcome.durationMs,
             };
           }
-          pushHistory({ ...fingerprint, at: Date.now() });
-        } else if (outcome.errorCode === "DUPLICATE_OBSERVATION" || outcome.errorCode === "CONTROLLER_DIRECTIVE") {
+        } else if (outcome.errorCode === "DUPLICATE_OBSERVATION" || outcome.errorCode === "NO_PROGRESS" || outcome.errorCode === "CONTROLLER_DIRECTIVE") {
+          // Controller responses are not observations and cannot establish progress.
+        } else if (!outcome.ok) {
           pushHistory({
             name: call.name,
             semanticArgsKey: semanticKey,
-            resultDigest: "controller:" + outcome.errorCode,
-            stateKey: state.appKey,
+            resultDigest: "error:" + (outcome.errorCode ?? "TOOL_ERROR"),
+            stateKey: cacheStateKey,
             ok: false,
-            errorCode: outcome.errorCode,
+            errorCode: outcome.errorCode ?? "TOOL_ERROR",
             at: Date.now(),
           });
         }
@@ -580,7 +599,7 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
         let toolPayload: string;
         if (outcome.ok) {
           toolPayload = JSON.stringify(outcome.result) ?? "null";
-        } else if (outcome.errorCode === "DUPLICATE_OBSERVATION" && outcome.result != null) {
+        } else if ((outcome.errorCode === "DUPLICATE_OBSERVATION" || outcome.errorCode === "NO_PROGRESS") && outcome.result != null) {
           toolPayload = JSON.stringify({ error: { code: outcome.errorCode, message: outcome.summary }, observation: outcome.result }) ?? "null";
         } else {
           toolPayload = JSON.stringify({ error: { code: outcome.errorCode, message: outcome.summary, ...(errorHint ? { hint: errorHint } : {}) } }) ?? "null";
@@ -609,7 +628,7 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
           }
         } else {
           consecutiveFailures = 0;
-          if (MUTATING_TOOLS.has(call.name)) revision += 1;
+          if (effect === "action") revision += 1;
           batchSucceeded.add(call.name);
         }
       }
@@ -619,12 +638,20 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
 
       // Controller update based on this batch's signals.
       let controllerInstruction = "";
-      // force_next_tool succeeded → back to normal auto rounds.
+      // A successful forced tool restores normal routing.
       if (directive.kind === "force_next_tool" && batchSucceeded.has(directive.name)) {
         directive = { kind: "auto" };
       }
-      if (sawDuplicate && directive.kind === "auto") {
-        const duplicateTool = lastDuplicateTool(calls, gates, state.key);
+      if (noProgressTools.size > 0 && directive.kind === "auto") {
+        const policy = noProgressPolicy(input.roleId);
+        if (policy === "gate") {
+          for (const name of noProgressTools) gates.set(name, state.key);
+          controllerInstruction = "检测到无进展循环（NO_PROGRESS）：相关观察工具已禁用。请执行真正不同的操作或输出最终结果。";
+        } else {
+          directive = policy;
+        }
+      } else if (duplicateTools.size > 0 && directive.kind === "auto") {
+        const duplicateTool = [...calls].reverse().find((call) => duplicateTools.has(call.name))?.name ?? [...duplicateTools][0];
         const policy = duplicateObservationPolicy(input.roleId, duplicateTool);
         if (policy === "gate") {
           gates.set(duplicateTool, state.key);
@@ -635,17 +662,6 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
       } else if (sawGatedCall && directive.kind === "auto") {
         // The model called an already-gated tool: escalate to force_final.
         directive = { kind: "force_final" };
-      }
-      if (directive.kind === "auto" && detectNoProgress(history)) {
-        const policy = noProgressPolicy(input.roleId);
-        if (policy === "gate") {
-          for (const record of history.slice(-4)) {
-            if (!MUTATING_TOOLS.has(record.name)) gates.set(record.name, state.key);
-          }
-          controllerInstruction = "检测到无进展循环（NO_PROGRESS）：相关观察工具已禁用。请执行真正不同的操作或输出最终结果。";
-        } else {
-          directive = policy;
-        }
       }
       if (directive.kind === "force_final" && controllerInstruction === "") {
         controllerInstruction = "Controller 指令：请立即依据已有信息输出最终 JSON（符合给定 schema），不要调用任何工具。";
@@ -690,32 +706,22 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
   throw new ToolLoopError("AGENT_TOOL_BUDGET_EXCEEDED", "该 Agent 的对话轮次超出预算（" + budget.maxRounds + " 轮）");
 }
 
-/** Which duplicate tool triggered the policy (prefer a non-mutating observation tool). */
-function lastDuplicateTool(calls: ToolCall[], gates: Map<string, string>, stateKey: string): string {
-  for (let index = calls.length - 1; index >= 0; index--) {
-    const name = calls[index].name;
-    if (gates.get(name) === stateKey) return name;
-    if (name === "inspect_current_app") return name;
-    if (name === "workspace_get_manifest" || name === "workspace_list_files" || name === "fs_list" || name === "fs_read" || name === "fs_stat" || name === "get_build_errors" || name === "get_test_failures") return name;
-  }
-  return calls.length > 0 ? calls[calls.length - 1].name : "inspect_current_app";
-}
-
-/** Execute one tool call and record its observation fingerprint. */
+/** Execute one tool call after controller checks have passed. */
 async function executeCall(
   call: ToolCall,
   input: RunAgentInput,
   toolCallId: string,
   startedAt: number,
-  state: StateVersion,
+  stateKey: string,
   semanticKey: string,
   history: ObservationRecord[]
 ): Promise<{ ok: boolean; result: unknown; summary: string; errorCode?: string; artifactIds: string[]; durationMs: number }> {
-  // REPEATED_FAILED_CALL: the same action previously failed with the same error — skip real execution.
+  // Skip an unchanged call that already failed in the same state.
   const previousFailure = history.find(
     (record) =>
       !record.ok &&
       record.name === call.name &&
+      record.stateKey === stateKey &&
       record.semanticArgsKey === semanticKey &&
       record.errorCode !== "APPROVAL_REQUIRED" &&
       record.errorCode !== "CONTROLLER_DIRECTIVE" &&
@@ -757,7 +763,7 @@ async function executeCall(
     const shape = isToolError(error) || error instanceof ToolExecutionError
       ? { code: (error as { code: string }).code, message: error instanceof Error ? error.message : "工具执行失败" }
       : { code: "TOOL_ERROR", message: error instanceof Error ? error.message.slice(0, 300) : "工具执行失败" };
-    const outcome = {
+    return {
       ok: false,
       result: null,
       summary: shape.message.slice(0, 300),
@@ -765,16 +771,6 @@ async function executeCall(
       artifactIds: [],
       durationMs: Date.now() - startedAt,
     };
-    history.push({
-      name: call.name,
-      semanticArgsKey: semanticKey,
-      resultDigest: "error:" + outcome.errorCode,
-      stateKey: state.appKey,
-      ok: false,
-      errorCode: outcome.errorCode,
-      at: Date.now(),
-    });
-    return outcome;
   }
 }
 

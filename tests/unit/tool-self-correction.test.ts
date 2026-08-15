@@ -208,7 +208,7 @@ describe("工具失败后的自我纠错", () => {
     expect(result.status).toBe("completed");
     const results = events.filter((e) => e.type === "tool_result");
     // Round 1: real PATH_ESCAPE execution; round 2: real success; round 3: the identical
-    // failure is NOT re-executed — the bounded history remembers it across the success.
+    // failure is not re-executed because bounded history survives the success.
     expect(results).toHaveLength(3);
     expect((results[0] as { errorCode?: string }).errorCode).toBe("PATH_ESCAPE");
     expect((results[1] as { errorCode?: string }).errorCode).toBeUndefined();
@@ -218,4 +218,47 @@ describe("工具失败后的自我纠错", () => {
     // Verify the read really happened at the filesystem level.
     expect(readFileSync(path.join(WORKSPACE, "src", "a.txt"), "utf8")).toContain("hello qubits");
   }, 30000);
+
+  it("状态变更后允许重试先前失败的相同观察", async () => {
+    const events: AgentEvent[] = [];
+    const context = makeContext(events);
+    const target = "src/recovered.txt";
+    let round = 0;
+    const provider: AIProvider = {
+      kind: "mock",
+      async generateWithTools(): Promise<AgentTurnResponse> {
+        round += 1;
+        if (round === 1 || round === 3) {
+          return {
+            content: null,
+            toolCalls: [{ id: "tc-read-" + round, name: "fs_read", rawArguments: JSON.stringify({ path: target, maxBytes: 4096 }) }],
+            reasoningContent: null,
+          };
+        }
+        if (round === 2) {
+          return {
+            content: null,
+            toolCalls: [{ id: "tc-write", name: "fs_write", rawArguments: JSON.stringify({ path: target, content: "recovered" }) }],
+            reasoningContent: null,
+          };
+        }
+        return { content: blueprintJson(), toolCalls: [], reasoningContent: null };
+      },
+    };
+
+    const result = await runToolCallingAgent({
+      roleId: "engineer",
+      agentRunId: "agent-selfcorr-d",
+      systemPrompt: "测试",
+      taskPrompt: "修复缺失文件",
+      finalSchema: appBlueprintWithSummarySchema,
+      context,
+      requireToolCall: true,
+      providerOverride: provider,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(errorCodes(events)).toEqual(["NOT_FOUND", undefined, undefined]);
+    expect(readFileSync(path.join(WORKSPACE, target), "utf8")).toBe("recovered");
+  });
 });

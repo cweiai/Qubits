@@ -30,7 +30,7 @@ import { dependencyAuditTool, reviewChangesTool, secretScanTool, securityReviewT
 import { createMigrationPlanTool, createShareLinkTool, publishPreviewTool, rollbackReleaseTool, runMigrationTool } from "./release";
 import { extractReferenceContentTool, listReferencesTool, saveReferenceTool, searchCompetitorsTool, searchDocsTool, searchUiExamplesTool, summarizeReferencesTool, verifyReferenceTool } from "./reference-extras";
 
-const DEFINITIONS: Record<string, AnyToolDefinition> = {
+const DEFINITIONS = {
   delegate_to_agent: delegateToAgentTool,
   search_references: searchReferencesTool,
   open_reference: openReferenceTool,
@@ -73,6 +73,83 @@ const DEFINITIONS: Record<string, AnyToolDefinition> = {
   create_migration_plan: createMigrationPlanTool, run_migration: runMigrationTool,
   publish_preview: publishPreviewTool, create_share_link: createShareLinkTool,
   rollback_release: rollbackReleaseTool,
+} satisfies Record<string, AnyToolDefinition>;
+
+type RegisteredToolName = keyof typeof DEFINITIONS;
+export type ToolEffect = "observation" | "action";
+
+/**
+ * Tool effects are controller contracts, not risk levels.
+ * Observations may be cached for an unchanged state; actions must always retain
+ * their real execution semantics because they can mutate state or advance workflow.
+ */
+const TOOL_EFFECTS: Record<RegisteredToolName, ToolEffect> = {
+  delegate_to_agent: "action",
+  search_references: "observation",
+  open_reference: "observation",
+  inspect_current_app: "observation",
+  render_preview: "action",
+  complete_run: "action",
+  create_artifact: "action",
+  get_artifact: "observation",
+  compare_artifacts: "observation",
+  request_user_approval: "action",
+  bash: "action",
+  workspace_init: "action",
+  workspace_get_manifest: "observation",
+  workspace_list_files: "observation",
+  dependency_list: "observation",
+  dependency_add: "action",
+  dependency_remove: "action",
+  security_scan: "observation",
+  create_code_snapshot: "action",
+  restore_code_snapshot: "action",
+  fs_list: "observation",
+  fs_read: "observation",
+  fs_write: "action",
+  fs_patch: "action",
+  fs_stat: "observation",
+  fs_delete: "action",
+  fs_create_dir: "action",
+  fs_copy: "action",
+  fs_move: "action",
+  run_format: "action",
+  run_lint: "observation",
+  run_typecheck: "observation",
+  run_tests: "observation",
+  run_build: "observation",
+  get_build_errors: "observation",
+  get_test_failures: "observation",
+  inspect_data_schema: "observation",
+  query_records: "observation",
+  count_records: "observation",
+  aggregate_records: "observation",
+  create_record: "action",
+  update_record: "action",
+  delete_record: "action",
+  seed_demo_data: "action",
+  analyze_project_data: "observation",
+  validate_data_access: "observation",
+  check_data_isolation: "observation",
+  create_checkpoint: "action",
+  restore_checkpoint: "action",
+  review_changes: "observation",
+  security_review: "observation",
+  secret_scan: "observation",
+  dependency_audit: "observation",
+  extract_reference_content: "observation",
+  search_docs: "observation",
+  search_ui_examples: "observation",
+  search_competitors: "observation",
+  summarize_references: "observation",
+  verify_reference: "observation",
+  save_reference: "action",
+  list_references: "observation",
+  create_migration_plan: "observation",
+  run_migration: "action",
+  publish_preview: "action",
+  create_share_link: "action",
+  rollback_release: "action",
 };
 
 /**
@@ -80,7 +157,7 @@ const DEFINITIONS: Record<string, AnyToolDefinition> = {
  * tool definition's allowedRoles field, which is the single source of truth for role
  * permissions. This guarantees a tool is never advertised to a role that cannot
  * execute it (no more FORBIDDEN_ROLE surprises). Adding a new RoleId is a compile
- * error here — every role must be present even with an empty list.
+ * error here; every role must be present even with an empty list.
  */
 const TOOL_PERMISSIONS: Record<RoleId, string[]> = (() => {
   const matrix: Record<RoleId, string[]> = {
@@ -100,11 +177,16 @@ export function getToolNamesForRole(roleId: RoleId): string[] {
 }
 
 export function getToolDefinitionsForRole(roleId: RoleId): AnyToolDefinition[] {
-  return (TOOL_PERMISSIONS[roleId] ?? []).map((name) => DEFINITIONS[name]).filter(Boolean);
+  const definitions = DEFINITIONS as Record<string, AnyToolDefinition>;
+  return (TOOL_PERMISSIONS[roleId] ?? []).map((name) => definitions[name]).filter(Boolean);
 }
 
 export function getToolDefinition(name: string): AnyToolDefinition | null {
-  return DEFINITIONS[name] ?? null;
+  return (DEFINITIONS as Record<string, AnyToolDefinition>)[name] ?? null;
+}
+
+export function getToolEffect(name: string): ToolEffect | null {
+  return (TOOL_EFFECTS as Record<string, ToolEffect>)[name] ?? null;
 }
 
 export function listToolNames(): string[] {

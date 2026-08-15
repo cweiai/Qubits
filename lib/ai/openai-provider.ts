@@ -7,12 +7,12 @@ import type { AIProvider, AgentTurnResponse, GenerateWithToolsInput } from "./pr
  * exposed to the client.
  *
  * Stable error contract:
- * - PROVIDER_TIMEOUT        — our own request deadline fired (no HTTP response)
- * - PROVIDER_NETWORK_ERROR  — fetch TypeError / ECONNRESET / ENOTFOUND / ETIMEDOUT …
- * - PROVIDER_RATE_LIMIT     — HTTP 429 (or 408)
- * - PROVIDER_AUTH_ERROR     — HTTP 401 / 403
- * - PROVIDER_BAD_REQUEST    — HTTP 400 / protocol errors
- * - PROVIDER_SERVER_ERROR   — HTTP 5xx
+ * - PROVIDER_TIMEOUT: our own request deadline fired without an HTTP response
+ * - PROVIDER_NETWORK_ERROR: fetch TypeError or a known network cause code
+ * - PROVIDER_RATE_LIMIT: HTTP 429 or 408
+ * - PROVIDER_AUTH_ERROR: HTTP 401 or 403
+ * - PROVIDER_BAD_REQUEST: HTTP 400 or a protocol error
+ * - PROVIDER_SERVER_ERROR: HTTP 5xx
  * Retry policy: network errors + 408/429/5xx are retried at most twice with exponential
  * backoff + jitter; 400/401/403 and protocol errors never retry; user aborts never retry.
  * Error messages never contain the API key, Authorization header or request body.
@@ -223,7 +223,7 @@ export function buildChatMessages(
             .filter((part): part is string => typeof part === "string" && part.length > 0)
             .join("\n\n");
         } else {
-          // internal flat shape → OpenAI protocol: every tool_call needs type:"function".
+          // OpenAI requires type:"function" for every internal flat tool call.
           assistant.tool_calls = message.tool_calls.map((call) => ({
             id: call.id.trim(),
             type: "function",
@@ -250,6 +250,29 @@ type RawToolCall = {
   type?: unknown;
   function?: { name?: unknown; arguments?: unknown };
 };
+
+interface OpenAIToolRequestFields {
+  tools?: Array<{ type: "function"; function: GenerateWithToolsInput["tools"][number] }>;
+  tool_choice?: "auto" | { type: "function"; function: { name: string } };
+}
+
+/** Build only valid OpenAI tool fields; a final-only turn omits both fields. */
+export function buildToolRequestFields(input: GenerateWithToolsInput): OpenAIToolRequestFields {
+  const choice = input.toolChoice ?? { mode: "auto" as const };
+  if (choice.mode === "none" || input.tools.length === 0) return {};
+
+  const tools = input.tools.map((tool) => ({ type: "function" as const, function: tool }));
+  if (choice.mode === "auto") return { tools, tool_choice: "auto" };
+
+  const selected = tools.find((tool) => tool.function.name === choice.name);
+  if (!selected) {
+    throw new ToolMessageProtocolError("Controller 指定的工具未暴露给当前角色：" + choice.name);
+  }
+  return {
+    tools: [selected],
+    tool_choice: { type: "function", function: { name: choice.name } },
+  };
+}
 
 /** Normalize a provider response into internal ToolCalls; malformed responses must fail loudly, never silently drop calls. */
 export function parseProviderToolCalls(raw: unknown): AgentTurnResponse["toolCalls"] {
@@ -294,18 +317,7 @@ async function attemptChatWithTools(input: GenerateWithToolsInput): Promise<Agen
   try {
     let response: Response;
     try {
-      // Controller tool choice: force_final → no tools + tool_choice:none;
-      // force_next_tool → only the named tool + forced function; otherwise auto.
-      const choice = input.toolChoice ?? { mode: "auto" as const };
-      let exposedTools = input.tools.map((tool) => ({ type: "function", function: tool }));
-      let toolChoiceField: unknown = "auto";
-      if (choice.mode === "none") {
-        exposedTools = [];
-        toolChoiceField = "none";
-      } else if (choice.mode === "function") {
-        exposedTools = input.tools.filter((tool) => tool.name === choice.name).map((tool) => ({ type: "function", function: tool }));
-        toolChoiceField = { type: "function", function: { name: choice.name } };
-      }
+      const toolFields = buildToolRequestFields(input);
       response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
@@ -313,14 +325,13 @@ async function attemptChatWithTools(input: GenerateWithToolsInput): Promise<Agen
           model,
           temperature: 0.2,
           max_tokens: 4096,
-          tools: exposedTools,
-          tool_choice: toolChoiceField,
+          ...toolFields,
           messages: buildChatMessages(input.system, input.messages, toolMessageCompatEnabled()),
         }),
         signal: controller.signal,
       });
     } catch (error) {
-      // fetch TypeError (connection reset, DNS failure, timeout via abort)…
+      // Map connection, DNS, and abort failures to stable provider errors.
       if (input.signal?.aborted) throw error; // user abort: no retry, CLIENT_ABORTED upstream
       if (error instanceof Error && error.name === "AbortError") {
         throw new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（" + Math.round(providerTimeoutMs() / 1000) + " 秒）。");

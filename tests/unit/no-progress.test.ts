@@ -180,7 +180,7 @@ describe("inspect_current_app 缓存与门控", () => {
       input.messages.some((m) => m.role === "tool" && m.content.includes("DUPLICATE_OBSERVATION"))
     );
     expect(duplicateFeedback).toBe(true);
-    // Duplicate feedback never tells the model to "修改参数后重试".
+    // Duplicate feedback must not advise another parameter-only retry.
     const allToolText = seenInputs.flatMap((input) => input.messages.filter((m) => m.role === "tool").map((m) => m.content as string));
     expect(allToolText.join("\n")).not.toContain("修改参数");
     assertToolMessagesBackfilled(seenInputs[seenInputs.length - 1].messages);
@@ -334,7 +334,39 @@ describe("NO_PROGRESS：A-B-A-B 交替循环", () => {
     expect(finalRound.tools).not.toContain("fs_read");
     // Every assistant.tool_calls batch was fully backfilled with matching tool messages.
     for (const input of seenInputs) assertToolMessagesBackfilled(input.messages);
-    // The agent converged successfully — the loop was NOT ended by failure budgets.
+    // The agent converged without relying on failure budgets.
     expect(events.some((e) => e.type === "error" && e.code === "TOOL_FAILURE_LIMIT_EXCEEDED")).toBe(false);
+  });
+
+  it("动作工具不会在执行后被改写成重复观察", async () => {
+    const events: AgentEvent[] = [];
+    const seenInputs: Array<{ tools: string[]; toolChoice: ToolChoiceSpec | undefined; messages: ChatMessage[] }> = [];
+    const context = makeContext("engineer", { emit: (event) => events.push(event) });
+    const writeArgs = JSON.stringify({ path: "action.txt", content: "stable" });
+    const provider = scriptedProvider(
+      [
+        { toolCalls: [{ name: "fs_write", rawArguments: writeArgs }] },
+        { toolCalls: [{ name: "fs_write", rawArguments: writeArgs }] },
+        { content: blueprintJson() },
+      ],
+      seenInputs
+    );
+
+    const result = await runToolCallingAgent({
+      roleId: "engineer",
+      agentRunId: "agent-noprog-000000000006",
+      systemPrompt: "测试",
+      taskPrompt: "写入文件",
+      finalSchema: appBlueprintWithSummarySchema,
+      context,
+      requireToolCall: true,
+      providerOverride: provider,
+    });
+
+    expect(result.status).toBe("completed");
+    const toolResults = events.filter((event) => event.type === "tool_result");
+    expect(toolResults).toHaveLength(2);
+    expect(toolResults.every((event) => event.ok && event.errorCode === undefined)).toBe(true);
+    expect(toolResults.some((event) => event.errorCode === "DUPLICATE_OBSERVATION")).toBe(false);
   });
 });

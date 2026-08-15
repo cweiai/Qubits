@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { runToolCallingAgent, ToolLoopError, readMaxTotalToolFailures } from "@/lib/ai/tool-loop";
@@ -90,12 +90,12 @@ afterAll(() => {
 });
 
 describe("收敛控制（FakeProvider）", () => {
-  it("重复成功调用：相同观察触发 DUPLICATE_OBSERVATION 并禁用工具，最终由轮次预算终止", async () => {
+  it("重复观察触发 DUPLICATE_OBSERVATION 并禁用工具，失控 provider 最终由轮次预算终止", async () => {
     const events: AgentEvent[] = [];
     const context = engineerContext(events);
     const provider = loopingProvider(() => ({
-      name: "fs_write",
-      rawArguments: JSON.stringify({ path: "loop.txt", content: "x" }),
+      name: "inspect_current_app",
+      rawArguments: JSON.stringify({ includeRecords: false, includeSchema: true }),
     }));
     await expect(
       runToolCallingAgent({
@@ -109,12 +109,10 @@ describe("收敛控制（FakeProvider）", () => {
         providerOverride: provider,
       })
     ).rejects.toSatisfy((error: unknown) => error instanceof ToolLoopError && (error as ToolLoopError).code === "AGENT_TOOL_BUDGET_EXCEEDED");
-    // The loop guard fired with the new semantic codes — NOT the failure threshold.
+    // The controller reports observation and directive errors without counting tool failures.
     expect(events.some((e) => e.type === "tool_result" && e.errorCode === "DUPLICATE_OBSERVATION")).toBe(true);
     expect(events.some((e) => e.type === "tool_result" && e.errorCode === "CONTROLLER_DIRECTIVE")).toBe(true);
     expect(events.some((e) => e.type === "error" && e.code === "TOOL_FAILURE_LIMIT_EXCEEDED")).toBe(false);
-    // The file was written at most OBSERVATION_REPEAT_LIMIT times (real execution stops early).
-    expect(existsSync(path.join(workspace, "loop.txt"))).toBe(true);
   });
 
   it("总工具调用预算能终止 Agent（AGENT_TOOL_BUDGET_EXCEEDED）", async () => {
@@ -189,7 +187,7 @@ describe("收敛控制（FakeProvider）", () => {
     const provider: AIProvider = {
       kind: "mock",
       async generateWithTools(): Promise<AgentTurnResponse> {
-        // The model returns the blueprint as a STRING inside content — must be rejected.
+        // A string containing JSON cannot substitute for the structured object.
         return { content: JSON.stringify(blueprint), toolCalls: [], reasoningContent: null };
       },
     };
@@ -263,7 +261,7 @@ describe("完整 Mock 流程：每类最终 artifact 只有一份", () => {
         artifactFile,
       });
       expect(result.status).toBe("completed");
-      // One artifact per final kind — persisted exactly once by the orchestrator.
+      // The orchestrator persists each final artifact kind exactly once.
       const entries = JSON.parse(readFileSync(artifactFile, "utf8")) as Array<{ ref: { kind: string } }>;
       const countByKind = (kind: string): number => entries.filter((entry) => entry.ref.kind === kind).length;
       expect(countByKind("product_brief")).toBe(1);
