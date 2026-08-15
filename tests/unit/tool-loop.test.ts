@@ -1,6 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { runMikeOrchestrator } from "@/lib/ai/mike-orchestrator";
@@ -14,15 +13,14 @@ import { runToolCallingAgent, ToolLoopError } from "@/lib/ai/tool-loop";
 import { assertValidToolMessageSequence } from "@/lib/ai/openai-provider";
 import type { AIProvider, ChatMessage } from "@/lib/ai/provider";
 import type { StoredArtifactEntry } from "@/lib/ai/artifact-store";
+import { mockProvider } from "@/tests/support/mock-provider";
 
 /**
- * Tool Calling orchestration tests: the mock replaces only the external model service (QUIBITS_MOCK_PROVIDER),
- * while the tool registry, permissions, delegation, preview/complete gating, and event protocol all run through real execution paths.
+ * Tool Calling orchestration tests inject a deterministic provider explicitly; the
+ * registry, permissions, delegation, preview/complete gating, and event protocol are real.
  */
 
 beforeAll(() => {
-  process.env.QUIBITS_MOCK_PROVIDER = "true";
-  process.env.REFERENCE_SEARCH_PROVIDER = "mock";
   delete process.env.SANDBOX_PROVIDER; // container-only; the orchestrator builds the real provider
 });
 
@@ -46,7 +44,7 @@ function makeContext(overrides: Partial<ToolExecutionContext> = {}): ToolExecuti
     artifacts,
     emit: () => undefined,
     childAgentRunner: async () => ({ status: "completed", artifactId: null, summary: "ok", issues: [] }),
-    reviewerApproved: false,
+    quality: { buildPassed: false, testsPassed: false, securityScanPassed: false },
     previewCommitted: false,
     workspaceDir: repoWorkspaceDir(),
     workspaceReady: true,
@@ -71,6 +69,7 @@ describe("迈克主编排（mock provider）", () => {
         projectRecords: null,
         emit: (event) => events.push(event),
         workspaceDir: wsDir,
+        providerOverride: mockProvider,
       });
       expect(result.status).toBe("completed");
       expect(events[0]).toMatchObject({ type: "agent_started", roleId: "team_leader", parentAgentRunId: null });
@@ -121,9 +120,8 @@ describe("迈克主编排（mock provider）", () => {
     }
   }, 180000);
 
-  it("同任务续跑：artifactFile 跨尝试持久化并恢复原产物 id（不重做已完成工作）", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "qubits-art-"));
-    const artifactFile = path.join(dir, "artifacts.json");
+  it("同任务续跑：持久化条目跨尝试恢复原产物 id（不重做已完成工作）", async () => {
+    let persisted: StoredArtifactEntry[] = [];
     const wsDir = repoWorkspaceDir();
     try {
       const events1: AgentEvent[] = [];
@@ -135,10 +133,11 @@ describe("迈克主编排（mock provider）", () => {
         projectRecords: null,
         emit: (event) => events1.push(event),
         workspaceDir: wsDir,
-        artifactFile,
+        persistArtifacts: (entries) => { persisted = entries; },
+        providerOverride: mockProvider,
       });
       expect(first.status).toBe("completed");
-      const raw1 = JSON.parse(readFileSync(artifactFile, "utf8")) as StoredArtifactEntry[];
+      const raw1 = persisted;
       expect(raw1.length).toBeGreaterThan(0);
       const ids1 = new Set(raw1.map((e) => e.ref.id));
 
@@ -151,18 +150,19 @@ describe("迈克主编排（mock provider）", () => {
         projectRecords: null,
         emit: (event) => events2.push(event),
         workspaceDir: wsDir,
-        artifactFile,
+        artifactSeed: persisted,
+        persistArtifacts: (entries) => { persisted = entries; },
         resumeContext: "【续跑第 1 次：从失败的那一步继续】测试上下文",
+        providerOverride: mockProvider,
       });
       expect(second.status).toBe("completed");
-      const raw2 = JSON.parse(readFileSync(artifactFile, "utf8")) as StoredArtifactEntry[];
+      const raw2 = persisted;
       const ids2 = raw2.map((e) => e.ref.id);
       // First attempt's artifact ids survive (restored, not dropped) and new ones are added.
       expect(ids1.size).toBeGreaterThan(0);
       for (const id of ids1) expect(ids2).toContain(id);
       expect(ids2.length).toBeGreaterThan(ids1.size);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
       rmSync(wsDir, { recursive: true, force: true });
     }
   }, 180000);
@@ -315,8 +315,8 @@ describe("工具权限与门控（真实执行器）", () => {
     ).rejects.toThrowError(ToolExecutionError);
   });
 
-  it("Reviewer 未批准时 render_preview 返回 PREVIEW_BLOCKED（即使构建成功）", async () => {
-    const context = makeContext({ reviewerApproved: false });
+  it("安全扫描未通过时 render_preview 返回 PREVIEW_BLOCKED（即使构建成功）", async () => {
+    const context = makeContext({ quality: { buildPassed: true, testsPassed: true, securityScanPassed: false } });
     const store = context.artifacts;
     const bundleRef = store.put({
       kind: "preview_bundle",
@@ -332,11 +332,11 @@ describe("工具权限与门控（真实执行器）", () => {
     });
     await expect(
       renderPreviewTool.execute({ artifactId: bundleRef.id, reason: "initial_generation", deviceHint: null }, context)
-    ).rejects.toThrowError(/尚未批准或存在阻断/);
+    ).rejects.toThrowError(/构建、测试与安全扫描/);
   });
 
   it("render_preview 不接受非 preview_bundle artifact", async () => {
-    const context = makeContext({ reviewerApproved: true });
+    const context = makeContext({ quality: { buildPassed: true, testsPassed: true, securityScanPassed: true } });
     const store = context.artifacts;
     const ref = store.put({
       kind: "code_workspace",
@@ -350,10 +350,9 @@ describe("工具权限与门控（真实执行器）", () => {
   });
 
   it("未 render_preview 时 complete_run 返回 PREVIEW_REQUIRED", async () => {
-    const context = makeContext({ reviewerApproved: true, previewCommitted: false });
+    const context = makeContext({ quality: { buildPassed: true, testsPassed: true, securityScanPassed: true }, previewCommitted: false });
     const store = context.artifacts;
     store.put({ kind: "product_brief", createdBy: "product_manager", parentAgentRunId: null, value: { summary: "x" } });
-    store.put({ kind: "app_blueprint", createdBy: "architect", parentAgentRunId: null, value: { summary: "x" } });
     store.put({ kind: "code_workspace", createdBy: "engineer", parentAgentRunId: null, value: { summary: "x" } });
     store.put({ kind: "preview_bundle", createdBy: "engineer", parentAgentRunId: null, value: { html: "<html></html>", bytes: 13 } });
     store.put({

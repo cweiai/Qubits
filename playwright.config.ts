@@ -1,9 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * Sandbox-flow e2e: no real LLM — tests write a valid AppSpec into localStorage
- * to enter preview directly, verifying the iframe sandbox, MessageChannel CRUD,
- * DB persistence, and isolation.
+ * Sandbox-flow e2e runs against the production server with a test-only persisted
+ * build fixture. Real model generation is covered separately by npm run eval:real.
  */
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -18,16 +17,12 @@ export default defineConfig({
     locale: "zh-CN",
   },
   webServer: {
-    command: "npm run build && npm run start -- --port 3206",
+    command: "node tests/e2e/seed.mjs && npm run build && npm run start -- --port 3206",
     url: "http://127.0.0.1:3206",
     reuseExistingServer: !process.env.CI,
     timeout: 300_000,
     env: {
       DATABASE_URL: "file:./data/e2e.db",
-      QUIBITS_MOCK_PROVIDER: "true",
-      REFERENCE_SEARCH_PROVIDER: "mock",
-      // Sandbox: container-only (the default). e2e requires a running Docker daemon
-      // because real build checks run inside the container — no local fallback.
       SANDBOX_PROVIDER: "container",
     },
   },

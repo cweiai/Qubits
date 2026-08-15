@@ -33,7 +33,7 @@ function makeContext(events: AgentEvent[]): ToolExecutionContext {
     artifacts: new ArtifactStore("run-fail"),
     emit: (event) => events.push(event),
     childAgentRunner: async () => ({ status: "completed", artifactId: null, summary: "ok", issues: [] }),
-    reviewerApproved: false,
+    quality: { buildPassed: false, testsPassed: false, securityScanPassed: false },
     previewCommitted: false,
     workspaceDir: FAIL_WORKSPACE,
     workspaceReady: true,

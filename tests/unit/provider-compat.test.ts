@@ -26,7 +26,7 @@ function validToolRound(): ChatMessage[] {
 }
 
 describe("OpenAI Tool Calling 消息协议", () => {
-  it("控制器只发送合法的工具字段，final-only 轮次省略空 tools", () => {
+  it("控制器只发送兼容的工具字段，final-only 轮次省略空 tools", () => {
     const tool = { name: "inspect_current_app", description: "inspect", parameters: { type: "object" } };
     const base = {
       system: "sys",
@@ -42,7 +42,7 @@ describe("OpenAI Tool Calling 消息协议", () => {
     });
     expect(buildToolRequestFields({ ...base, toolChoice: { mode: "function", name: tool.name } })).toEqual({
       tools: [{ type: "function", function: tool }],
-      tool_choice: { type: "function", function: { name: tool.name } },
+      tool_choice: "auto",
     });
     expect(() => buildToolRequestFields({ ...base, toolChoice: { mode: "function", name: "missing" } }))
       .toThrowError(ToolMessageProtocolError);

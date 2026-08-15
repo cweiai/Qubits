@@ -29,7 +29,7 @@ function makeContext(role: ToolExecutionContext["roleId"] = "engineer", override
     artifacts,
     emit: () => undefined,
     childAgentRunner: async () => ({ status: "completed", artifactId: null, summary: "ok", issues: [] }),
-    reviewerApproved: true,
+    quality: { buildPassed: true, testsPassed: true, securityScanPassed: true },
     previewCommitted: false,
     workspaceDir: wsDir,
     workspaceReady: true,
@@ -67,27 +67,18 @@ describe("Registry 与权限", () => {
     }
   });
 
-  it("能力矩阵：非迈克不能 delegate；艾玛不能写文件；大卫不能 fs_list；鲍勃被瘦身", () => {
+  it("能力矩阵：只有迈克能委派，只有亚历克斯能修改和验证工作区", () => {
     expect(getToolNamesForRole("team_leader")).toContain("delegate_to_agent");
     expect(getToolNamesForRole("product_manager")).not.toContain("delegate_to_agent");
     expect(getToolNamesForRole("product_manager")).not.toContain("fs_write");
-    expect(getToolNamesForRole("data_scientist")).not.toContain("fs_list");
     expect(getToolNamesForRole("engineer")).toContain("bash");
-    expect(getToolNamesForRole("reviewer")).toContain("bash");
-    expect(getToolNamesForRole("reviewer")).toContain("secret_scan");
-    // The architect remains design-only with no workspace mutation tools.
-    expect(getToolNamesForRole("architect")).not.toContain("bash");
-    expect(getToolNamesForRole("architect")).not.toContain("fs_read");
-    expect(getToolNamesForRole("architect")).not.toContain("fs_list");
-    expect(getToolNamesForRole("architect")).not.toContain("create_artifact");
-    expect(getToolNamesForRole("architect")).not.toContain("workspace_get_manifest");
-    expect(getToolNamesForRole("architect")).toContain("inspect_current_app");
-    // Product manager: app-summary tool only.
-    expect(getToolNamesForRole("product_manager")).toEqual(["inspect_current_app"]);
+    expect(getToolNamesForRole("engineer")).toContain("secret_scan");
+    expect(getToolNamesForRole("engineer")).toContain("security_scan");
+    expect(getToolNamesForRole("product_manager")).toContain("inspect_current_app");
   });
 
   it("权限矩阵由 allowedRoles 推导：被授予的工具必然可执行（无两层名单脱节）", () => {
-    const roles = ["team_leader", "product_manager", "researcher", "architect", "engineer", "data_scientist", "reviewer", "security_reviewer"] as const;
+    const roles = ["team_leader", "product_manager", "engineer"] as const;
     for (const role of roles) {
       const granted = getToolNamesForRole(role);
       const derived = listToolNames().filter((name) => getToolDefinition(name)!.allowedRoles.includes(role));
@@ -213,20 +204,20 @@ describe("工程检查与数据工具", () => {
   }, 180000);
 
   it("数据工具尊重 manifest allowlist", async () => {
-    const ctx = makeContext("data_scientist");
+    const ctx = makeContext("product_manager");
     const count = await executeTool("count_records", { collection: "task" }, ctx) as { count: number };
     expect(count.count).toBe(1);
     await expect(executeTool("query_records", { collection: "undeclared", limit: 10 }, ctx)).rejects.toThrowError(/未声明/);
     await expect(executeTool("aggregate_records", { collection: "task", fieldId: "amount", metric: "sum" }, ctx)).rejects.toThrowError(/未声明|number/);
-    // David can't query undeclared fields (validated in aggregate); non-data_scientist roles can't query.
-    await expect(executeTool("query_records", { collection: "task", limit: 10 }, makeContext("product_manager"))).rejects.toThrowError(/无权/);
+    // Product manager cannot query undeclared fields; Mike has no direct record-query permission.
+    await expect(executeTool("query_records", { collection: "task", limit: 10 }, makeContext("team_leader"))).rejects.toThrowError(/无权/);
   });
 });
 
 describe("P2 适配器未接入", () => {
   it("发布/迁移适配器不向任何角色暴露（未配置时不伪造）", async () => {
-    await expect(executeTool("publish_preview", {}, makeContext("team_leader"))).rejects.toThrowError(/无权/);
-    await expect(executeTool("create_migration_plan", {}, makeContext("team_leader"))).rejects.toThrowError(/无权/);
+    await expect(executeTool("publish_preview", {}, makeContext("team_leader"))).rejects.toThrowError(/未知工具/);
+    await expect(executeTool("create_migration_plan", {}, makeContext("team_leader"))).rejects.toThrowError(/未知工具/);
   });
 });
 

@@ -1,22 +1,23 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { runToolCallingAgent, ToolLoopError, readMaxTotalToolFailures } from "@/lib/ai/tool-loop";
 import { runMikeOrchestrator } from "@/lib/ai/mike-orchestrator";
 import { ProviderError } from "@/lib/ai/openai-provider";
-import { appBlueprintWithSummarySchema } from "@/lib/contracts/artifacts";
+import { appBlueprintWithSummarySchema, productBriefWithSummarySchema } from "@/lib/contracts/artifacts";
 import { ArtifactStore } from "@/lib/ai/artifact-store";
 import type { AgentEvent } from "@/lib/contracts/agent-events";
 import type { ToolExecutionContext } from "@/lib/ai/tools/types";
 import type { AIProvider, AgentTurnResponse } from "@/lib/ai/provider";
 import { dockerAvailable } from "./fakes";
 import { makeTaskManifest } from "./fixtures";
+import { mockProvider } from "@/tests/support/mock-provider";
 
 /**
  * Agent-convergence tests (FakeProvider, no real model):
  * repeated-success loop guard, total tool-call budget, total deadline, malformed-args
- * failure cap, string-blueprint rejection, and stable provider error codes reaching
+ * failure cap, string-artifact rejection, and stable provider error codes reaching
  * the orchestrator's error event (what the API route persists to build_tasks.error_code).
  */
 
@@ -38,7 +39,7 @@ function makeContext(events: AgentEvent[] = [], overrides: Partial<ToolExecution
     artifacts: new ArtifactStore("run-conv"),
     emit: (event) => events.push(event),
     childAgentRunner: async () => ({ status: "completed", artifactId: null, summary: "ok", issues: [] }),
-    reviewerApproved: false,
+    quality: { buildPassed: false, testsPassed: false, securityScanPassed: false },
     previewCommitted: false,
     workspaceDir: workspace,
     workspaceReady: true,
@@ -90,6 +91,45 @@ afterAll(() => {
 });
 
 describe("收敛控制（FakeProvider）", () => {
+  it("把真实最终 JSON Schema 注入每个 Agent 的系统契约", async () => {
+    const events: AgentEvent[] = [];
+    let receivedSystem = "";
+    const provider: AIProvider = {
+      kind: "mock",
+      async generateWithTools(input): Promise<AgentTurnResponse> {
+        receivedSystem = input.system;
+        return {
+          content: JSON.stringify({
+            appName: "通用应用",
+            targetUser: "测试用户",
+            problem: "验证结构化输出",
+            coreFeatures: ["功能一"],
+            primaryEntity: "记录",
+            assumptions: [],
+            outOfScope: [],
+            summary: "结构化输出完成",
+          }),
+          toolCalls: [],
+          reasoningContent: null,
+        };
+      },
+    };
+    const result = await runToolCallingAgent({
+      roleId: "product_manager",
+      agentRunId: "agent-conv-schema-0001",
+      systemPrompt: "测试系统提示词",
+      taskPrompt: "生成产品简报",
+      finalSchema: productBriefWithSummarySchema,
+      context: makeContext(events, { roleId: "product_manager" }),
+      requireToolCall: false,
+      providerOverride: provider,
+    });
+    expect(result.status).toBe("completed");
+    expect(receivedSystem).toContain("FINAL OUTPUT JSON SCHEMA");
+    expect(receivedSystem).toContain('"coreFeatures"');
+    expect(receivedSystem).toContain('"primaryEntity"');
+  });
+
   it("重复观察触发 DUPLICATE_OBSERVATION 并禁用工具，失控 provider 最终由轮次预算终止", async () => {
     const events: AgentEvent[] = [];
     const context = engineerContext(events);
@@ -180,24 +220,24 @@ describe("收敛控制（FakeProvider）", () => {
     expect(events.some((e) => e.type === "tool_result" && e.errorCode === "INVALID_ARGS")).toBe(true);
   });
 
-  it("architect 输出 JSON 字符串（非结构化对象）被 finalSchema 拒绝并耗尽轮次预算", async () => {
+  it("product_manager 输出 JSON 字符串（非结构化对象）被 finalSchema 拒绝并耗尽轮次预算", async () => {
     const events: AgentEvent[] = [];
-    const context = makeContext(events, { roleId: "architect" });
-    const blueprint = JSON.stringify({ appType: "x", summary: "完成" });
+    const context = makeContext(events, { roleId: "product_manager" });
+    const brief = JSON.stringify({ appName: "x", targetUser: "x", problem: "x", coreFeatures: ["x"], primaryEntity: "x", assumptions: [], outOfScope: [], summary: "完成" });
     const provider: AIProvider = {
       kind: "mock",
       async generateWithTools(): Promise<AgentTurnResponse> {
         // A string containing JSON cannot substitute for the structured object.
-        return { content: JSON.stringify(blueprint), toolCalls: [], reasoningContent: null };
+        return { content: JSON.stringify(brief), toolCalls: [], reasoningContent: null };
       },
     };
     await expect(
       runToolCallingAgent({
-        roleId: "architect",
+        roleId: "product_manager",
         agentRunId: "agent-conv-000000000005",
         systemPrompt: "测试",
-        taskPrompt: "产出蓝图",
-        finalSchema: appBlueprintWithSummarySchema,
+        taskPrompt: "产出产品简报",
+        finalSchema: productBriefWithSummarySchema,
         context,
         requireToolCall: false,
         providerOverride: provider,
@@ -240,41 +280,35 @@ describe("Provider 错误码穿透到编排错误事件", () => {
 });
 
 describe("完整 Mock 流程：每类最终 artifact 只有一份", () => {
-  it.skipIf(!dockerAvailable())("番茄钟应用：ProductBrief→Blueprint→CodeWorkspace→Reviewer→Preview 依次完成且单份产物", async () => {
-    process.env.QUIBITS_MOCK_PROVIDER = "true";
-    process.env.REFERENCE_SEARCH_PROVIDER = "mock";
+  it.skipIf(!dockerAvailable())("任务管理 fixture：ProductBrief→CodeWorkspace→Quality Gate→Preview 依次完成且单份产物", async () => {
     try {
       const ws = path.join(homedir(), ".qubits-conv-full-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6));
-      const artifactFile = path.join(homedir(), ".qubits-conv-art-" + Date.now() + ".json");
       mkdirSync(ws, { recursive: true });
       scratch.push(ws);
-      scratch.push(artifactFile);
+      let entries: Array<{ ref: { kind: string }; value: unknown }> = [];
       const events: AgentEvent[] = [];
       const result = await runMikeOrchestrator({
-        prompt: "做一个番茄钟应用",
+        prompt: "创建一个个人任务管理器",
         currentManifest: null,
         currentAppId: "test-app-0001",
         currentVersion: 0,
         projectRecords: null,
         emit: (event) => events.push(event),
         workspaceDir: ws,
-        artifactFile,
+        persistArtifacts: (next) => { entries = next; },
+        providerOverride: mockProvider,
       });
       expect(result.status).toBe("completed");
       // The orchestrator persists each final artifact kind exactly once.
-      const entries = JSON.parse(readFileSync(artifactFile, "utf8")) as Array<{ ref: { kind: string } }>;
       const countByKind = (kind: string): number => entries.filter((entry) => entry.ref.kind === kind).length;
       expect(countByKind("product_brief")).toBe(1);
-      expect(countByKind("app_blueprint")).toBe(1);
       expect(countByKind("code_workspace")).toBe(1);
-      expect(countByKind("review_report")).toBe(1);
+      expect(countByKind("security_report")).toBeGreaterThanOrEqual(1);
       expect(countByKind("build_report")).toBeGreaterThanOrEqual(1);
       expect(countByKind("preview_bundle")).toBeGreaterThanOrEqual(1);
       // The pipeline really finished: preview_ready + run completed events exist.
       expect(events.some((e) => e.type === "preview_ready")).toBe(true);
     } finally {
-      delete process.env.QUIBITS_MOCK_PROVIDER;
-      delete process.env.REFERENCE_SEARCH_PROVIDER;
     }
   }, 300000);
 });

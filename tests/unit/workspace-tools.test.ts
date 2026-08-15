@@ -7,7 +7,7 @@ import { ArtifactStore } from "@/lib/ai/artifact-store";
 import type { ToolExecutionContext } from "@/lib/ai/tools/types";
 import { FakeSandboxProvider } from "./fakes";
 import { initWorkspace } from "@/lib/workspace/workspace-manager";
-import { createCodeSnapshot } from "@/lib/workspace/snapshot";
+import { createCodeSnapshot, snapshotDirFor } from "@/lib/workspace/snapshot";
 
 /**
  * Workspace/dependency tool tests: workspace_init is idempotent, dependency_add only
@@ -38,7 +38,7 @@ function makeContext(role: ToolExecutionContext["roleId"] = "engineer"): ToolExe
     artifacts: new ArtifactStore("run-wstools"),
     emit: () => undefined,
     childAgentRunner: async () => ({ status: "completed", artifactId: null, summary: "ok", issues: [] }),
-    reviewerApproved: false,
+    quality: { buildPassed: false, testsPassed: false, securityScanPassed: false },
     previewCommitted: false,
     workspaceDir: wsDir,
     workspaceReady: false,
@@ -104,14 +104,70 @@ describe("workspace 工具", () => {
     const manifest = await executeTool("workspace_get_manifest", {}, ctx) as { name: string; main: string };
     expect(manifest.main).toBe("src/main.tsx");
   });
+
+  it("中间代码快照使用 code_snapshot，不占用最终 code_workspace 产物", async () => {
+    const ctx = makeContext();
+    await executeTool("workspace_init", {}, ctx);
+    const result = await executeTool("create_code_snapshot", {}, ctx) as { snapshotId: string; artifactId: string };
+    try {
+      expect(ctx.artifacts.getRef(result.artifactId)?.kind).toBe("code_snapshot");
+      expect(ctx.artifacts.list("code_workspace")).toHaveLength(0);
+    } finally {
+      rmSync(snapshotDirFor(ctx.currentAppId, result.snapshotId), { recursive: true, force: true });
+    }
+  });
+
+  it("失败测试会持久化脱敏日志供 get_test_failures 读取", async () => {
+    const ctx = makeContext();
+    await executeTool("workspace_init", {}, ctx);
+    const sandbox = ctx.sandbox as FakeSandboxProvider;
+    sandbox.defaultResult = {
+      exitCode: 1,
+      stdout: "FAIL src/example.test.ts\nAssertionError: expected 1 to be 2\n",
+      stderr: "",
+      timedOut: false,
+      durationMs: 12,
+    };
+    await expect(executeTool("run_tests", {}, ctx)).rejects.toThrowError(/失败/);
+    const report = await executeTool("get_test_failures", {}, ctx) as { hasReport: boolean; status: string; summary: string };
+    expect(report.hasReport).toBe(true);
+    expect(report.status).toBe("failed");
+    expect(report.summary).toContain("expected 1 to be 2");
+  });
+
+  it("run_format 格式化源码时保留 TypeScript 类型、泛型和注释", async () => {
+    const ctx = makeContext();
+    await executeTool("workspace_init", {}, ctx);
+    const source = [
+      "interface Item<T>{value:T}",
+      "// Preserve the type contract because callers depend on it.",
+      "export function identity<T>(item:Item<T>):Item<T>{return item}",
+      "export const View=({label}:{label:string}):JSX.Element=><div>{label}</div>",
+      "",
+    ].join("\n");
+    await executeTool("fs_write", { path: "src/typed.tsx", content: source }, ctx);
+
+    const result = await executeTool("run_format", {}, ctx) as { formatted: number; changed: number };
+    const formatted = readFileSync(path.join(wsDir, "src", "typed.tsx"), "utf8");
+
+    expect(result.formatted).toBeGreaterThan(0);
+    expect(result.changed).toBeGreaterThan(0);
+    expect(formatted).toContain("interface Item<T>");
+    expect(formatted).toContain("item: Item<T>");
+    expect(formatted).toContain("): Item<T>");
+    expect(formatted).toContain("{ label: string }");
+    expect(formatted).toContain(": JSX.Element");
+    expect(formatted).toContain("// Preserve the type contract because callers depend on it.");
+  });
 });
 
 describe("dependency 工具", () => {
   it("dependency_add 只接受 allowlist 固定版本", async () => {
     const ctx = makeContext();
     await executeTool("workspace_init", {}, ctx);
-    const list = await executeTool("dependency_list", {}, ctx) as { allowlist: Array<{ name: string }> };
+    const list = await executeTool("dependency_list", {}, ctx) as { allowlist: Array<{ name: string }>; builtIns: string[] };
     expect(list.allowlist.some((d) => d.name === "lucide-react")).toBe(true);
+    expect(list.builtIns).toEqual(["react", "react-dom"]);
 
     await expect(executeTool("dependency_add", { name: "left-pad" }, ctx)).rejects.toThrowError(/allowlist/);
     await expect(executeTool("dependency_add", { name: "https://evil.example/pkg.tgz" }, ctx)).rejects.toThrowError(/allowlist|校验失败/);

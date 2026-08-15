@@ -42,17 +42,15 @@ describe("Preview 自动展开策略", () => {
     expect(state.mode).toBe("expanded");
   });
 
-  it("恢复偏好：保存的折叠偏好优先；无偏好且已有 AppSpec 则展开", () => {
+  it("恢复偏好：保存的折叠偏好优先；无偏好时默认展开", () => {
     const collapsed = reducePreviewPolicy(INITIAL_PREVIEW_POLICY, {
       type: "restore_prefs",
       saved: "collapsed",
-      hasAppSpec: true,
     });
     expect(collapsed.mode).toBe("collapsed");
     const expanded = reducePreviewPolicy(INITIAL_PREVIEW_POLICY, {
       type: "restore_prefs",
       saved: null,
-      hasAppSpec: true,
     });
     expect(expanded.mode).toBe("expanded");
   });

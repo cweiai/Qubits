@@ -51,7 +51,7 @@ function makeContext(workspaceDir: string, sandbox: SandboxProvider = new FakeSa
     artifacts: new ArtifactStore("run-paths"),
     emit: () => undefined,
     childAgentRunner: async () => ({ status: "completed", artifactId: null, summary: "ok", issues: [] }),
-    reviewerApproved: true,
+    quality: { buildPassed: true, testsPassed: true, securityScanPassed: true },
     previewCommitted: false,
     workspaceDir,
     workspaceReady: true,
@@ -208,7 +208,7 @@ describe("文件工具级 jail（executeTool）", () => {
   it("review_changes(\"/\") 与 review_changes(\"../\") 被拒绝", async () => {
     const dir = makeScratch("qubits-review-");
     initWorkspace(dir, { taskId: "task-jail-00000004" });
-    const ctx = makeContext(dir, new FakeSandboxProvider(), "reviewer");
+    const ctx = makeContext(dir, new FakeSandboxProvider(), "engineer");
     await expect(executeTool("review_changes", { path: "/" }, ctx)).rejects.toThrowError(/绝对路径/);
     await expect(executeTool("review_changes", { path: "../" }, ctx)).rejects.toThrowError(/拒绝|\.\./);
   });
@@ -219,7 +219,7 @@ describe("文件工具级 jail（executeTool）", () => {
     const outside = makeScratch("qubits-outside8-");
     writeFileSync(path.join(outside, "leak.txt"), "sk-live-abcdefghijklmnop");
     symlinkSync(outside, path.join(dir, "escape"));
-    const ctx = makeContext(dir, new FakeSandboxProvider(), "reviewer");
+    const ctx = makeContext(dir, new FakeSandboxProvider(), "engineer");
     await expect(executeTool("secret_scan", {}, ctx)).rejects.toThrowError(/SECURITY_BLOCKED|符号链接/);
   });
 

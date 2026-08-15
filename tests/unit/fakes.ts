@@ -20,7 +20,6 @@ export class FakeSandboxProvider implements SandboxProvider {
       sandboxId: "fake-" + Math.random().toString(36).slice(2, 8),
       provider: this.kind,
       workspaceDir,
-      demoMode: true,
       isProductionSecurityBoundary: true,
     };
   }

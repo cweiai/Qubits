@@ -26,11 +26,8 @@ describe("toolEventStage 阶段映射", () => {
     expect(toolEventStage(event("team_leader", "complete_run"))).toBe("previewing");
   });
 
-  it("鲍勃属于架构设计；艾玛/大卫/艾瑞斯属于规划", () => {
-    expect(toolEventStage(event("architect", "workspace_get_manifest"))).toBe("architecting");
+  it("艾玛的工具属于规划", () => {
     expect(toolEventStage(event("product_manager", "inspect_current_app"))).toBe("planning");
-    expect(toolEventStage(event("data_scientist", "query_records"))).toBe("planning");
-    expect(toolEventStage(event("researcher", "search_references"))).toBe("planning");
   });
 
   it("亚历克斯的写文件属于编写代码；lint/typecheck/tests/build 属于构建验证", () => {
@@ -41,13 +38,8 @@ describe("toolEventStage 阶段映射", () => {
     expect(toolEventStage(event("engineer", "run_typecheck"))).toBe("validating");
     expect(toolEventStage(event("engineer", "run_tests"))).toBe("validating");
     expect(toolEventStage(event("engineer", "run_build"))).toBe("validating");
+    expect(toolEventStage(event("engineer", "security_scan"))).toBe("validating");
     expect(toolEventStage(event("engineer", "get_build_errors"))).toBe("validating");
-  });
-
-  it("Reviewer 的工具属于安全评审（含复跑的检查）", () => {
-    expect(toolEventStage(event("reviewer", "security_scan"))).toBe("reviewing");
-    expect(toolEventStage(event("reviewer", "run_lint"))).toBe("reviewing");
-    expect(toolEventStage(event("reviewer", "fs_read"))).toBe("reviewing");
   });
 });
 
@@ -69,16 +61,16 @@ describe("groupToolEvents 分组", () => {
       makeEvent("team_leader", "delegate_to_agent", 1),
       makeEvent("engineer", "fs_write", 2),
       makeEvent("engineer", "run_build", 3),
-      makeEvent("reviewer", "security_scan", 4),
+      makeEvent("engineer", "security_scan", 4),
       makeEvent("team_leader", "render_preview", 5),
       makeEvent("team_leader", "complete_run", 6),
     ]);
-    expect(groups.map((g) => g.stage)).toEqual(["planning", "coding", "validating", "reviewing", "previewing"]);
-    expect(groups.map((g) => g.events.length)).toEqual([1, 1, 1, 1, 2]);
+    expect(groups.map((g) => g.stage)).toEqual(["planning", "coding", "validating", "previewing"]);
+    expect(groups.map((g) => g.events.length)).toEqual([1, 1, 2, 2]);
   });
 
   it("每个阶段都有标签与固定顺序", () => {
-    expect(TOOL_STAGE_ORDER.length).toBe(6);
+    expect(TOOL_STAGE_ORDER.length).toBe(4);
     for (const stage of TOOL_STAGE_ORDER) {
       expect(TOOL_STAGE_LABELS[stage]).toBeTruthy();
     }

@@ -54,4 +54,20 @@ describe("agentEventSchema 对真实网关 id 的兼容", () => {
     expect(agentEventSchema.safeParse({ type: "tool_call_started", agentRunId: "x", roleId: "engineer", toolName: "fs_read" }).success).toBe(false);
     expect(agentEventSchema.safeParse({ type: "not_an_event" }).success).toBe(false);
   });
+
+  it("只接受安全阶段摘要，不接受原始 reasoning 增量", () => {
+    expect(agentEventSchema.safeParse({
+      type: "progress_summary",
+      agentRunId: "agent-progress",
+      roleId: "engineer",
+      phase: "validating",
+      summary: "类型检查已完成，正在运行测试。",
+    }).success).toBe(true);
+    expect(agentEventSchema.safeParse({
+      type: "reasoning_delta",
+      agentRunId: "agent-progress",
+      roleId: "engineer",
+      delta: "raw reasoning",
+    }).success).toBe(false);
+  });
 });

@@ -47,28 +47,39 @@ describe("ArtifactStore 持久化与恢复", () => {
   it("相同 runId + kind + 规范化内容幂等去重：返回同一 id，不产生第二份", () => {
     const store = new ArtifactStore("run-e");
     const first = store.put({
-      kind: "app_blueprint",
-      createdBy: "architect",
+      kind: "code_workspace",
+      createdBy: "engineer",
       parentAgentRunId: "agent-mike-000000000001",
       value: { appType: "番茄钟", dataModel: { primaryCollection: "pomodoros" }, summary: "完成" },
     });
     // Same content, different key order: canonicalization makes them identical.
     const second = store.put({
-      kind: "app_blueprint",
-      createdBy: "architect",
+      kind: "code_workspace",
+      createdBy: "engineer",
       parentAgentRunId: "agent-mike-000000000001",
       value: { summary: "完成", dataModel: { primaryCollection: "pomodoros" }, appType: "番茄钟" },
     });
     expect(second.id).toBe(first.id);
-    expect(store.list("app_blueprint")).toHaveLength(1);
+    expect(store.list("code_workspace")).toHaveLength(1);
     // Different content stays a separate artifact.
     const third = store.put({
-      kind: "app_blueprint",
-      createdBy: "architect",
+      kind: "code_workspace",
+      createdBy: "engineer",
       parentAgentRunId: "agent-mike-000000000001",
       value: { appType: "番茄钟", dataModel: { primaryCollection: "pomodoros" }, summary: "完成v2" },
     });
     expect(third.id).not.toBe(first.id);
-    expect(store.list("app_blueprint")).toHaveLength(2);
+    expect(store.list("code_workspace")).toHaveLength(2);
+  });
+
+  it("findLatest 使用写入顺序，并把再次出现的去重产物视为最新", () => {
+    const store = new ArtifactStore("run-order");
+    const failed = store.put({ kind: "build_report", createdBy: "engineer", parentAgentRunId: null, value: { status: "failed" } });
+    const success = store.put({ kind: "build_report", createdBy: "engineer", parentAgentRunId: null, value: { status: "success" } });
+    expect(store.findLatest("build_report")?.id).toBe(success.id);
+
+    const failedAgain = store.put({ kind: "build_report", createdBy: "engineer", parentAgentRunId: null, value: { status: "failed" } });
+    expect(failedAgain.id).toBe(failed.id);
+    expect(store.findLatest("build_report")?.id).toBe(failed.id);
   });
 });

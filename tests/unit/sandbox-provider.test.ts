@@ -119,4 +119,27 @@ describe("真实 Docker 集成（需要 Docker daemon）", () => {
       rmSync(ws, { recursive: true, force: true });
     }
   }, 90000);
+
+  it.skipIf(!enabled)("顺序执行超过并发上限次数不会耗尽进程槽位", async () => {
+    const { mkdirSync, rmSync } = await import("node:fs");
+    const { homedir } = await import("node:os");
+    const path = await import("node:path");
+    const ws = path.join(homedir(), ".qubits-sandbox-slots-" + Date.now());
+    mkdirSync(ws, { recursive: true });
+    try {
+      const provider = new ContainerSandboxProvider();
+      for (let index = 0; index < 10; index++) {
+        const result = await provider.exec({
+          command: "node",
+          args: ["-e", "console.log('run-" + index + "')"],
+          cwd: ws,
+          timeoutMs: 60000,
+        });
+        expect(result.exitCode).toBe(0);
+        expect(result.stderr).not.toContain("子进程数量超出上限");
+      }
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  }, 180000);
 });

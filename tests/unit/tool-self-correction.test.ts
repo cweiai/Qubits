@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { runToolCallingAgent } from "@/lib/ai/tool-loop";
@@ -9,6 +9,9 @@ import type { AgentEvent } from "@/lib/contracts/agent-events";
 import type { ToolExecutionContext } from "@/lib/ai/tools/types";
 import type { AIProvider, AgentTurnResponse, ChatMessage } from "@/lib/ai/provider";
 import { makeTaskManifest } from "./fixtures";
+import { FakeSandboxProvider } from "./fakes";
+import { initWorkspace } from "@/lib/workspace/workspace-manager";
+import { grantApproval } from "@/lib/ai/tools/approval";
 
 /**
  * Self-correction loop: after a failure, the role:tool result and the user correction
@@ -61,8 +64,9 @@ function blueprintJson(): string {
 }
 
 function makeContext(events: AgentEvent[]): ToolExecutionContext {
+  const runId = "run-selfcorr-" + crypto.randomUUID();
   return {
-    runId: "run-selfcorr",
+    runId,
     parentAgentRunId: "agent-mike-000000000009",
     roleId: "engineer",
     depth: 1,
@@ -72,10 +76,10 @@ function makeContext(events: AgentEvent[]): ToolExecutionContext {
     currentVersion: 1,
     projectRecords: null,
     dataAdapter: null,
-    artifacts: new ArtifactStore("run-selfcorr"),
+    artifacts: new ArtifactStore(runId),
     emit: (event) => events.push(event),
     childAgentRunner: async () => ({ status: "completed", artifactId: null, summary: "ok", issues: [] }),
-    reviewerApproved: false,
+    quality: { buildPassed: false, testsPassed: false, securityScanPassed: false },
     previewCommitted: false,
     workspaceDir: WORKSPACE,
     workspaceReady: true,
@@ -109,6 +113,64 @@ function errorCodes(events: AgentEvent[]): (string | undefined)[] {
 }
 
 describe("工具失败后的自我纠错", () => {
+  it("模型收到完整诊断，同时 UI 工具事件保持短摘要", async () => {
+    const workspaceDir = mkdtempSync(path.join(tmpdir(), "qubits-long-diagnostic-"));
+    const events: AgentEvent[] = [];
+    const seen: ChatMessage[][] = [];
+    const sandbox = new FakeSandboxProvider();
+    const marker = "ACTIONABLE_DIAGNOSTIC_AT_END";
+    sandbox.defaultResult = {
+      exitCode: 1,
+      stdout: "lint failure\n" + "x".repeat(700) + "\n" + marker,
+      stderr: "",
+      timedOut: false,
+      durationMs: 1,
+    };
+    initWorkspace(workspaceDir, { taskId: "long-diagnostic" });
+    const context = { ...makeContext(events), workspaceDir, sandbox };
+    let round = 0;
+    const provider: AIProvider = {
+      kind: "mock",
+      async generateWithTools(input): Promise<AgentTurnResponse> {
+        seen.push([...input.messages]);
+        round += 1;
+        if (round === 1) {
+          return {
+            content: null,
+            toolCalls: [{ id: "tc-long-lint", name: "run_lint", rawArguments: "{}" }],
+            reasoningContent: null,
+          };
+        }
+        return { content: blueprintJson(), toolCalls: [], reasoningContent: null };
+      },
+    };
+
+    try {
+      const result = await runToolCallingAgent({
+        roleId: "engineer",
+        agentRunId: "agent-selfcorr-long-diagnostic",
+        systemPrompt: "测试",
+        taskPrompt: "运行检查并根据完整错误修复",
+        finalSchema: appBlueprintWithSummarySchema,
+        context,
+        requireToolCall: true,
+        providerOverride: provider,
+      });
+      expect(result.status).toBe("completed");
+      const event = events.find((item) => item.type === "tool_result");
+      expect(event?.type).toBe("tool_result");
+      if (event?.type === "tool_result") {
+        expect(event.resultSummary.length).toBeLessThanOrEqual(300);
+        expect(event.resultSummary).not.toContain(marker);
+      }
+      const toolMessage = seen[1]?.find((message) => message.role === "tool");
+      expect(toolMessage?.content.length).toBeGreaterThan(300);
+      expect(toolMessage?.content).toContain(marker);
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
   it("绝对路径失败：纠错消息包含违规参数与相对路径建议，原样重试被 REPEATED_FAILED_CALL 拦截", async () => {
     process.env.QUIBITS_MAX_TOOL_FAILURES = "2";
     const events: AgentEvent[] = [];
@@ -144,28 +206,40 @@ describe("工具失败后的自我纠错", () => {
     expect(events.some((e) => e.type === "error" && e.code === "TOOL_FAILURE_LIMIT_EXCEEDED")).toBe(true);
   });
 
-  it("审批类失败的原样重试不会被快速拒绝（等待审批后重试是合法的）", async () => {
-    process.env.QUIBITS_MAX_TOOL_FAILURES = "2";
+  it("高风险工具会等待数据库审批后再执行", async () => {
     const events: AgentEvent[] = [];
     const seen: ChatMessage[][] = [];
     const context = makeContext(events);
-    await expect(
-      runToolCallingAgent({
-        roleId: "engineer",
-        agentRunId: "agent-selfcorr-b",
-        systemPrompt: "测试",
-        taskPrompt: "删除文件",
-        finalSchema: appBlueprintWithSummarySchema,
-        context,
-        requireToolCall: true,
-        providerOverride: repeatingProvider(seen, {
-          id: "tc-del",
-          name: "fs_delete",
-          rawArguments: JSON.stringify({ path: "src/a.txt", soft: true }),
-        }),
-      })
-    ).rejects.toThrowError(/连续失败 3 次/);
-    expect(errorCodes(events)).toEqual(["APPROVAL_REQUIRED", "APPROVAL_REQUIRED", "APPROVAL_REQUIRED"]);
+    writeFileSync(path.join(WORKSPACE, "src", "a.txt"), "hello qubits");
+    context.emit = (event) => {
+      events.push(event);
+      if (event.type === "approval_requested") {
+        setTimeout(() => { grantApproval(event.approvalId); }, 20);
+      }
+    };
+    let round = 0;
+    const result = await runToolCallingAgent({
+      roleId: "engineer",
+      agentRunId: "agent-selfcorr-b",
+      systemPrompt: "测试",
+      taskPrompt: "删除文件",
+      finalSchema: appBlueprintWithSummarySchema,
+      context,
+      requireToolCall: true,
+      providerOverride: {
+        kind: "mock",
+        async generateWithTools(input) {
+          seen.push([...input.messages]);
+          round += 1;
+          if (round === 1) return { content: null, toolCalls: [{ id: "tc-del", name: "fs_delete", rawArguments: JSON.stringify({ path: "src/a.txt", soft: true }) }], reasoningContent: null };
+          return { content: blueprintJson(), toolCalls: [], reasoningContent: null };
+        },
+      },
+    });
+    expect(result.status).toBe("completed");
+    expect(events.some((event) => event.type === "approval_requested")).toBe(true);
+    expect(events.some((event) => event.type === "tool_result" && event.toolName === "fs_delete" && event.ok)).toBe(true);
+    writeFileSync(path.join(WORKSPACE, "src", "a.txt"), "hello qubits");
   });
 
   it("失败历史跨成功保留：间隔成功后相同失败调用不再真实执行（REPEATED_FAILED_CALL）", async () => {

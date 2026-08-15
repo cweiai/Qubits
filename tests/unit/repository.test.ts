@@ -47,4 +47,23 @@ describe("AppRepository", () => {
     expect(repo.deleteRecord({ id: "r2", projectId: "p1", appId: "a1", collection: "task" })).toBe(false);
     expect(repo.deleteRecord({ id: "r1", projectId: "p1", appId: "a1", collection: "task" })).toBe(true);
   });
+
+  it("审批状态持久化且只允许一次决策", () => {
+    repo.ensureProject("prj-a");
+    const approval = repo.createApproval({
+      id: "apv-test-0001",
+      projectId: "prj-a",
+      taskId: "task-a",
+      runId: "run-a",
+      toolCallId: "call-a",
+      toolName: "fs_delete",
+      reason: "删除工作区文件",
+      expiresAt: Date.now() + 60_000,
+    });
+    expect(approval.status).toBe("pending");
+    expect(approval.toolCallId).toBe("call-a");
+    expect(repo.resolveApproval(approval.id, "granted", "user")?.status).toBe("granted");
+    expect(repo.resolveApproval(approval.id, "denied", "user")).toBeNull();
+    expect(repo.getLatestApproval("run-a", "fs_delete")?.status).toBe("granted");
+  });
 });
