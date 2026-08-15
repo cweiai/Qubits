@@ -242,6 +242,31 @@ describe("多对话 API", () => {
     );
     expect(present.status).toBe(200);
     expect(await present.text()).toContain("app-a");
+
+    // Orchestrator-persisted preview_bundle artifacts are JSON ({ html, bytes, builtAt });
+    // the preview route must decode and serve bundle.html instead of the JSON envelope.
+    repo.insertArtifact({
+      id: "art-preview-000000000002",
+      projectId: "prj-cv-000001",
+      taskId: null,
+      kind: "preview_bundle",
+      name: "对话 A 应用（JSON bundle）",
+      content: JSON.stringify({ html: "<!doctype html><html><body>app-a-json</body></html>", bytes: 64, builtAt: 1 }),
+    });
+    repo.updateConversationApp(convA.id, "prj-cv-000001", {
+      previewBundleId: "art-preview-000000000002",
+      previewVersion: 2,
+    });
+    const jsonBundle = await previewGet(
+      new NextRequest("http://localhost/api/projects/current/preview?conversationId=" + convA.id, {
+        method: "GET",
+        headers: { cookie: "qubits_project=prj-cv-000001" },
+      })
+    );
+    expect(jsonBundle.status).toBe(200);
+    const jsonBundleText = await jsonBundle.text();
+    expect(jsonBundleText).toContain("app-a-json");
+    expect(jsonBundleText).toContain("__QUBITS_POST_MESSAGE_GUARD__");
   });
 
   it("旧项目级应用状态一次性迁移到最近对话（AppSpec 草稿保留）", async () => {
