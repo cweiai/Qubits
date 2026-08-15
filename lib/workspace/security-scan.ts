@@ -38,6 +38,7 @@ const RULES: ScanRule[] = [
   { name: "NO_NETWORK", pattern: /\bfetch\s*\(|\bXMLHttpRequest\b|\bWebSocket\s*\(|\bEventSource\s*\(|navigator\.sendBeacon/, message: "禁止网络请求（沙盒无网络能力）" },
   { name: "NO_STORAGE", pattern: /\blocalStorage\b|\bsessionStorage\b|\bdocument\.cookie\b|\bindexedDB\b/, message: "禁止访问存储与 Cookie" },
   { name: "NO_PARENT_ACCESS", pattern: /\bwindow\.parent\b|\bwindow\.top\b|\.parent\b/, message: "禁止访问父页面/宿主 DOM" },
+  { name: "NO_PARENT_MESSAGING", pattern: /\b(?:parent|top)\.postMessage\s*\(/, message: "禁止直接向父页面/top 发送 postMessage（数据通道请使用 Qubits SDK）" },
   { name: "NO_PROCESS_ENV", pattern: /\bprocess\.env\b/, message: "禁止读取环境变量" },
   { name: "NO_CREDENTIALS", pattern: /(api[_-]?key|secret|password|authorization)\s*[:=]\s*["'`][^"'`]{4,}/i, message: "禁止硬编码凭据" },
   { name: "NO_SECRET_VALUE", pattern: /(sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._-]{8,})/, message: "禁止密钥/令牌字面量" },
