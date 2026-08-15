@@ -73,6 +73,26 @@ test("Code Tab：真实快照文件树与只读源码；Logs Tab：真实构建/
   await expect(page.frameLocator(FRAME).locator("body > *").first()).toBeVisible();
 });
 
+test("沙盒内 postMessage 缺少 targetOrigin 时自动补全为 *（WebKit SyntaxError 防护）", async ({ page }) => {
+  await page.context().clearCookies();
+  await openFixture(page);
+
+  const result = await evaluateInFrame(page, () => {
+    try {
+      window.postMessage("qubits-post-message-guard-test");
+      window.postMessage("qubits-slash-origin-guard-test", "/");
+      window.postMessage("qubits-invalid-origin-guard-test", "not-an-origin");
+      window.postMessage("qubits-options-origin-guard-test", { targetOrigin: "/" });
+      window.parent.postMessage("qubits-parent-post-message-guard-test");
+      window.top?.postMessage("qubits-top-post-message-guard-test");
+      return "ok";
+    } catch (error) {
+      return error instanceof Error ? error.name + ":" + error.message : String(error);
+    }
+  });
+  expect(result).toBe("ok");
+});
+
 test("iframe 隔离：无法访问 localStorage / parent / 网络 / Cookie", async ({ page }) => {
   await page.context().clearCookies();
   await openFixture(page);

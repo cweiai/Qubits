@@ -21,12 +21,14 @@ interface BridgeHost {
 }
 
 const REQUEST_TIMEOUT_MS = 12_000;
+const HANDSHAKE_TIMEOUT_MS = 8_000;
 
 export class SandboxHostBridge {
   private port: MessagePort | null = null;
   private pending = new Map<string, { timer: ReturnType<typeof setTimeout>; controller: AbortController }>();
   private disposed = false;
   private initiated = false;
+  private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private iframe: HTMLIFrameElement,
@@ -52,6 +54,8 @@ export class SandboxHostBridge {
     if (this.disposed) return;
     this.disposed = true;
     this.host.removeEventListener("message", this.onWindowMessage);
+    if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+    this.handshakeTimer = null;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.controller.abort();
@@ -98,8 +102,13 @@ export class SandboxHostBridge {
         "*",
         [channel.port2]
       );
+      this.handshakeTimer = setTimeout(() => {
+        this.handshakeTimer = null;
+        if (this.disposed || this.port === null) return;
+        this.options.onStatusChange?.("error", "沙盒数据通道握手超时，请重试");
+      }, HANDSHAKE_TIMEOUT_MS);
     } catch {
-      // iframe already unloaded
+      this.options.onStatusChange?.("error", "沙盒 iframe 不可用，请重试");
     }
   }
 
@@ -130,6 +139,8 @@ export class SandboxHostBridge {
 
     switch (message.type) {
       case "QUBITS_READY": {
+        if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+        this.handshakeTimer = null;
         this.options.onStatusChange?.("ready");
         this.sendToPort({
           type: "QUBITS_SPEC",

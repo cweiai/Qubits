@@ -93,9 +93,130 @@ function randomRequestId(): string {
   return prefix + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
 }
 
+type GuardedWindow = Window & {
+  __QUBITS_POST_MESSAGE_GUARD__?: boolean;
+  __QUBITS_REAL_PARENT__?: Window;
+  __QUBITS_REAL_TOP__?: Window;
+};
+
+/**
+ * The route may have already installed a guard for legacy bundles; when it has, it
+ * also stores the real (non-proxied) parent/top WindowProxy references here so the
+ * SDK can keep validating event.source and handshakes against the real objects.
+ */
+const realParentWindow: Window = (window as GuardedWindow).__QUBITS_REAL_PARENT__ ?? window.parent;
+const realTopWindow: Window = (window as GuardedWindow).__QUBITS_REAL_TOP__ ?? window.top ?? window;
+
+function normalizedPostMessage(
+  target: Window,
+  message: unknown,
+  targetOriginOrOptions?: string | WindowPostMessageOptions,
+  transfer?: Transferable[]
+): void {
+  if (typeof targetOriginOrOptions === "object" && targetOriginOrOptions !== null) {
+    const options: WindowPostMessageOptions = {
+      ...targetOriginOrOptions,
+      targetOrigin: normalizeTargetOrigin(targetOriginOrOptions.targetOrigin),
+    };
+    target.postMessage(message, options);
+    return;
+  }
+  const targetOrigin = normalizeTargetOrigin(targetOriginOrOptions);
+  target.postMessage(message, targetOrigin, transfer);
+}
+
+function normalizeTargetOrigin(value: unknown): string {
+  if (value === "*") return "*";
+  if (typeof value !== "string" || value.length === 0) return "*";
+  try {
+    const url = new URL(value);
+    return url.origin === value ? value : "*";
+  } catch {
+    return "*";
+  }
+}
+
+/**
+ * WebKit throws `SyntaxError: The string did not match the expected pattern.` when
+ * `postMessage` is called without a valid targetOrigin. Normalize missing/empty
+ * origins to "*" for `window.postMessage` and, via a WindowProxy proxy, also for
+ * `parent.postMessage` / `top.postMessage`. App code therefore cannot crash the
+ * preview through a one-argument postMessage call.
+ */
+function installPostMessageGuard(): void {
+  const guardedWindow = window as GuardedWindow;
+  try {
+    if (guardedWindow.__QUBITS_POST_MESSAGE_GUARD__) return;
+    guardedWindow.__QUBITS_POST_MESSAGE_GUARD__ = true;
+    guardedWindow.__QUBITS_REAL_PARENT__ = realParentWindow;
+    guardedWindow.__QUBITS_REAL_TOP__ = realTopWindow;
+
+    const originalPostMessage = window.postMessage.bind(window);
+    const guardedWindowPost = function (
+      message: unknown,
+      targetOriginOrOptions?: string | WindowPostMessageOptions,
+      transfer?: Transferable[]
+    ): void {
+      if (typeof targetOriginOrOptions === "object" && targetOriginOrOptions !== null) {
+        const options: WindowPostMessageOptions = {
+          ...targetOriginOrOptions,
+          targetOrigin: normalizeTargetOrigin(targetOriginOrOptions.targetOrigin),
+        };
+        originalPostMessage(message, options);
+        return;
+      }
+      const targetOrigin = normalizeTargetOrigin(targetOriginOrOptions);
+      originalPostMessage(message, targetOrigin, transfer);
+    };
+    window.postMessage = guardedWindowPost as typeof window.postMessage;
+
+    const proxyWindow = (real: Window): Window =>
+      new Proxy(real, {
+        get(target, property) {
+          if (property === "postMessage") {
+            return function (
+              message: unknown,
+              targetOriginOrOptions?: string | WindowPostMessageOptions,
+              transfer?: Transferable[]
+            ): void {
+              normalizedPostMessage(target, message, targetOriginOrOptions, transfer);
+            };
+          }
+          try {
+            const value = (target as unknown as Record<string | symbol, unknown>)[property];
+            return typeof value === "function"
+              ? (value as (...args: unknown[]) => unknown).bind(target)
+              : value;
+          } catch {
+            return undefined;
+          }
+        },
+      }) as Window;
+
+    try {
+      Object.defineProperty(guardedWindow, "parent", {
+        configurable: true,
+        get: () => proxyWindow(realParentWindow),
+      });
+    } catch {
+      // parent already shadowed or read-only; window.postMessage guard still applies.
+    }
+    try {
+      Object.defineProperty(guardedWindow, "top", {
+        configurable: true,
+        get: () => proxyWindow(realTopWindow),
+      });
+    } catch {
+      // top already shadowed or read-only; window.postMessage guard still applies.
+    }
+  } catch {
+    // A read-only postMessage is unusual; the SDK path below still works.
+  }
+}
+
 function sendWindow(message: unknown): void {
   try {
-    window.parent.postMessage(message, "*");
+    realParentWindow.postMessage(message, "*");
   } catch {
     // parent unavailable
   }
@@ -151,7 +272,7 @@ function onPortMessage(event: MessageEvent): void {
 }
 
 function onWindowMessage(event: MessageEvent): void {
-  if (event.source !== window.parent) return; // only accept messages from the host page
+  if (event.source !== realParentWindow) return; // only accept messages from the host page
   const data = (event.data ?? {}) as { type?: string; nonce?: string; appId?: string; appVersion?: number };
   if (!data || data.type !== "QUBITS_INIT") return;
   if (typeof data.nonce !== "string" || data.nonce.length < 8) return;
@@ -240,6 +361,7 @@ declare global {
   }
 }
 
+installPostMessageGuard();
 window.Qubits = qubits;
 window.addEventListener("message", onWindowMessage);
 sendWindow({ type: "QUBITS_HANDSHAKE" });

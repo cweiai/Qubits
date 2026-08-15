@@ -128,9 +128,10 @@ export function SandboxPreview({
       onNotify: (level, message) => {
         report({ phase: "ready", notice: { level, message } });
       },
-      onStatusChange: (status) => {
+      onStatusChange: (status, detail) => {
         report({
           phase: status === "ready" ? "ready" : status === "error" ? "error" : "connecting",
+          message: status === "error" ? detail ?? "沙盒数据通道握手失败，请重试" : null,
           notice: null,
         });
       },
