@@ -11,7 +11,7 @@ import {
   workspaceCheckResultSchema,
 } from "./schemas";
 import { buildApp } from "@/lib/workspace/builder";
-import { runWorkspaceLint, runWorkspaceTests, runWorkspaceTypecheck } from "@/lib/workspace/runner";
+import { runWorkspaceLint, runWorkspaceTests, runWorkspaceTypecheck, WorkspaceCheckError } from "@/lib/workspace/runner";
 import { WorkspaceError } from "@/lib/workspace/errors";
 
 /**
@@ -40,7 +40,7 @@ export const runLintTool: ServerToolDefinition<z.infer<typeof workspaceCheckArgs
   description: "用系统 ESLint 配置对工作区 src 执行真实 lint（受限沙盒执行，真实 exitCode）。",
   argsSchema: workspaceCheckArgsSchema,
   resultSchema: workspaceCheckResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(_args, context) {
@@ -58,7 +58,7 @@ export const runTypecheckTool: ServerToolDefinition<z.infer<typeof workspaceChec
   description: "用系统 tsconfig 对工作区执行真实 TypeScript 类型检查。",
   argsSchema: workspaceCheckArgsSchema,
   resultSchema: workspaceCheckResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(_args, context) {
@@ -73,15 +73,16 @@ export const runTypecheckTool: ServerToolDefinition<z.infer<typeof workspaceChec
 
 export const runTestsTool: ServerToolDefinition<z.infer<typeof workspaceCheckArgsSchema>, z.infer<typeof workspaceCheckResultSchema>> = {
   name: "run_tests",
-  description: "用系统 vitest 配置运行工作区测试（真实执行；通过时产出 test_report）。",
+  description: "用系统 vitest 配置运行工作区测试（真实执行；通过或失败都产出 test_report 供后续诊断）。",
   argsSchema: workspaceCheckArgsSchema,
   resultSchema: workspaceCheckResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(_args, context) {
     try {
       const result = await runWorkspaceTests(context.sandbox, requireWorkspace(context));
+      context.quality.testsPassed = result.status === "passed";
       if (result.status === "passed") {
         context.artifacts.put({
           kind: "test_report",
@@ -92,6 +93,19 @@ export const runTestsTool: ServerToolDefinition<z.infer<typeof workspaceCheckArg
       }
       return { status: result.status, exitCode: result.exitCode, summary: result.summary };
     } catch (error) {
+      context.quality.testsPassed = false;
+      if (error instanceof WorkspaceCheckError) {
+        context.artifacts.put({
+          kind: "test_report",
+          createdBy: context.roleId,
+          parentAgentRunId: context.parentAgentRunId,
+          value: {
+            status: "failed",
+            summary: (error.result.log || error.result.summary).slice(-2800),
+            durationMs: error.result.durationMs,
+          },
+        });
+      }
       throw checkError(error, "TEST_FAILED");
     }
   },
@@ -102,12 +116,13 @@ export const runBuildTool: ServerToolDefinition<z.infer<typeof runBuildArgsSchem
   description: "用系统 esbuild/postcss 构建配置打包工作区：成功时产出真实 preview_bundle 与 build_report 产物。",
   argsSchema: runBuildArgsSchema,
   resultSchema: runBuildResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(_args, context) {
     const workspaceDir = requireWorkspace(context);
     const result = await buildApp(workspaceDir);
+    context.quality.buildPassed = result.report.status === "success";
     const buildArtifactId = context.artifacts.put({
       kind: "build_report",
       createdBy: context.roleId,
@@ -143,7 +158,7 @@ export const getBuildErrorsTool: ServerToolDefinition<z.infer<typeof runBuildArg
   description: "返回最近一次真实构建报告的错误与日志（无报告时不伪造）。",
   argsSchema: runBuildArgsSchema,
   resultSchema: getBuildErrorsResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
@@ -174,7 +189,7 @@ export const getTestFailuresTool: ServerToolDefinition<z.infer<typeof runBuildAr
   description: "返回最近一次真实测试报告（无报告时不伪造）。",
   argsSchema: runBuildArgsSchema,
   resultSchema: getTestFailuresResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {

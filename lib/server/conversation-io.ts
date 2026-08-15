@@ -1,4 +1,4 @@
-import type { ConversationRow, MessageRow, TaskRow } from "@/lib/db/repository";
+import type { ApprovalRow, ConversationRow, MessageRow, TaskRow } from "@/lib/db/repository";
 
 /** Server row → API JSON (parses metadata/roles; the client rebuilds views from this). */
 
@@ -83,5 +83,18 @@ export function toTaskJson(row: TaskRow): Record<string, unknown> {
     errorMessage: row.errorMessage,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  };
+}
+
+export function toApprovalJson(row: ApprovalRow): Record<string, unknown> {
+  return {
+    approvalId: row.id,
+    taskId: row.taskId,
+    toolCallId: row.toolCallId,
+    toolName: row.toolName,
+    reason: row.reason,
+    status: row.status,
+    createdAt: row.createdAt,
+    expiresAt: row.expiresAt,
   };
 }

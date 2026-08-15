@@ -5,7 +5,7 @@ import {
   dataAggregateArgsSchema, dataAggregateResultSchema, dataCountArgsSchema, dataCountResultSchema,
   dataQueryArgsSchema, dataQueryResultSchema, recordCreateArgsSchema, recordCreateResultSchema,
   recordUpdateArgsSchema, recordUpdateResultSchema, recordDeleteArgsSchema, recordDeleteResultSchema,
-  seedDemoDataArgsSchema, seedDemoDataResultSchema, dataSchemaResultSchema, dataAccessResultSchema,
+  dataSchemaResultSchema, dataAccessResultSchema,
   analyzeProjectDataArgsSchema, analyzeProjectDataResultSchema,
 } from "./schemas";
 import { validateRecordInput } from "@/lib/db/sandbox-data";
@@ -33,7 +33,7 @@ export const inspectDataSchemaTool: ServerToolDefinition<Record<string, never>, 
   description: "返回当前 manifest 声明的集合与字段 schema。",
   argsSchema: z.object({}).strict(),
   resultSchema: dataSchemaResultSchema,
-  allowedRoles: ["data_scientist", "reviewer"],
+  allowedRoles: ["product_manager", "engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
@@ -51,10 +51,10 @@ export const inspectDataSchemaTool: ServerToolDefinition<Record<string, never>, 
 
 export const queryRecordsTool: ServerToolDefinition<{ collection: string; filter?: Record<string, string | number | boolean>; limit: number }, { collection: string; records: Array<Record<string, unknown>>; truncated: boolean }> = {
   name: "query_records",
-  description: "按 AppSpec allowlist 查询当前应用已授权记录。",
+  description: "按当前 manifest allowlist 查询已授权记录。",
   argsSchema: dataQueryArgsSchema,
   resultSchema: dataQueryResultSchema,
-  allowedRoles: ["data_scientist"],
+  allowedRoles: ["product_manager"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -71,7 +71,7 @@ export const countRecordsTool: ServerToolDefinition<{ collection: string; filter
   description: "统计记录数量。",
   argsSchema: dataCountArgsSchema,
   resultSchema: dataCountResultSchema,
-  allowedRoles: ["data_scientist", "reviewer"],
+  allowedRoles: ["product_manager", "engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -87,7 +87,7 @@ export const aggregateRecordsTool: ServerToolDefinition<{ collection: string; fi
   description: "对已授权数字字段做 count/sum/average 聚合。",
   argsSchema: dataAggregateArgsSchema,
   resultSchema: dataAggregateResultSchema,
-  allowedRoles: ["data_scientist"],
+  allowedRoles: ["product_manager"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -109,7 +109,7 @@ export const createRecordTool: ServerToolDefinition<{ collection: string; input:
   description: "在已声明集合中创建记录（服务端字段级校验）。",
   argsSchema: recordCreateArgsSchema,
   resultSchema: recordCreateResultSchema,
-  allowedRoles: ["data_scientist", "engineer"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(args, context) {
@@ -127,7 +127,7 @@ export const updateRecordTool: ServerToolDefinition<{ collection: string; id: st
   description: "更新已声明集合中的记录（scope 校验）。",
   argsSchema: recordUpdateArgsSchema,
   resultSchema: recordUpdateResultSchema,
-  allowedRoles: ["data_scientist", "engineer"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(args, context) {
@@ -144,7 +144,7 @@ export const deleteRecordTool: ServerToolDefinition<{ collection: string; id: st
   description: "删除记录（高风险，需要审批）。",
   argsSchema: recordDeleteArgsSchema,
   resultSchema: recordDeleteResultSchema,
-  allowedRoles: ["data_scientist", "engineer"],
+  allowedRoles: ["engineer"],
   risk: "high",
   requiresApproval: true,
   async execute(args, context) {
@@ -155,47 +155,12 @@ export const deleteRecordTool: ServerToolDefinition<{ collection: string; id: st
   },
 };
 
-export const seedDemoDataTool: ServerToolDefinition<{ collection: string; count: number }, { seeded: number }> = {
-  name: "seed_demo_data",
-  description: "为已声明集合写入演示数据（仅当集合为空）。",
-  argsSchema: seedDemoDataArgsSchema,
-  resultSchema: seedDemoDataResultSchema,
-  allowedRoles: ["engineer", "data_scientist"],
-  risk: "low",
-  requiresApproval: false,
-  async execute(args, context) {
-    const collection = requireCollection(context, args.collection);
-    if (!context.dataAdapter) throw new ToolExecutionError("DATA_NOT_CONFIGURED", "数据写入未配置", false);
-    const existing = context.dataAdapter.list(collection.name);
-    if (existing.length > 0) return { seeded: 0 };
-    let seeded = 0;
-    for (let i = 0; i < args.count; i++) {
-      const input: Record<string, unknown> = {};
-      for (const field of collection.fields) {
-        if (field.type === "text") input[field.name] = "示例" + (i + 1);
-        else if (field.type === "number") input[field.name] = i * 10;
-        else if (field.type === "select") input[field.name] = field.options?.[0] ?? "";
-        else if (field.type === "boolean") input[field.name] = false;
-        else if (field.type === "date") input[field.name] = "2025-08-01";
-      }
-      try {
-        const cleaned = validateRecordInput(collection as never, input, "create");
-        context.dataAdapter.insert(collection.name, cleaned);
-        seeded += 1;
-      } catch {
-        // skip invalid seeds
-      }
-    }
-    return { seeded };
-  },
-};
-
 export const analyzeProjectDataTool: ServerToolDefinition<{ metric: "count" | "countWhere" | "sum" | "average" | "trend"; fieldId: string | null; filter?: Record<string, string | number | boolean> }, { metric: string; fieldId: string | null; value: number | string; note: string; timeRange: string }> = {
   name: "analyze_project_data",
-  description: "大卫专用：对已授权记录做受控聚合分析（脱敏数值）。",
+  description: "对已授权记录做受控聚合分析（脱敏数值）。",
   argsSchema: analyzeProjectDataArgsSchema,
   resultSchema: analyzeProjectDataResultSchema,
-  allowedRoles: ["data_scientist"],
+  allowedRoles: ["product_manager"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -227,7 +192,7 @@ export const validateDataAccessTool: ServerToolDefinition<{ collection: string; 
   description: "校验集合/操作是否在当前 manifest allowlist 内。",
   argsSchema: z.object({ collection: z.string().min(1).max(64), operation: z.string().min(1).max(40) }).strict() as never,
   resultSchema: dataAccessResultSchema,
-  allowedRoles: ["reviewer", "data_scientist"],
+  allowedRoles: ["product_manager", "engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -248,7 +213,7 @@ export const checkDataIsolationTool: ServerToolDefinition<Record<string, never>,
   description: "校验数据适配器只访问当前项目/app scope。",
   argsSchema: z.object({}).strict() as never,
   resultSchema: dataAccessResultSchema,
-  allowedRoles: ["reviewer", "security_reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {

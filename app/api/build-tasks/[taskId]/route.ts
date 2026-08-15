@@ -58,6 +58,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
     if (running && running.id !== task.id) throw new ApiError("BUILD_IN_PROGRESS", "已有生成任务进行中", 409);
 
     // Retry keeps the workspace/artifacts/history; only status and stale cards are reset.
+    repo.expirePendingApprovals(task.id);
     repo.removeTaskErrors(task.id);
     repo.removeTaskRoleMessages(task.id);
     repo.updateTask(task.id, {

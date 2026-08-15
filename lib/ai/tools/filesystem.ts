@@ -2,7 +2,7 @@ import "server-only";
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, copyFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import type { ServerToolDefinition, ToolExecutionContext } from "./types";
-import { ToolExecutionError } from "./types";
+import { invalidateQualityGates, ToolExecutionError } from "./types";
 import { assertApproved } from "./approval";
 import {
   fsCopyArgsSchema, fsCopyResultSchema, fsCreateDirArgsSchema, fsCreateDirResultSchema,
@@ -99,7 +99,7 @@ export const fsListTool: ServerToolDefinition<{ path: string; maxDepth: number; 
   description: "列出 workspace 内目录（限制深度与条目数）。path 必须是工作区内相对路径（禁止绝对路径、.. 与符号链接）。",
   argsSchema: fsListArgsSchema,
   resultSchema: fsListResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -135,7 +135,7 @@ export const fsReadTool: ServerToolDefinition<{ path: string; maxBytes: number }
   description: "读取 workspace 内文件（限制大小；路径必须安全且不含符号链接）。",
   argsSchema: fsReadArgsSchema,
   resultSchema: fsReadResultSchema,
-  allowedRoles: ["engineer", "reviewer", "security_reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -176,6 +176,7 @@ export const fsWriteTool: ServerToolDefinition<{ path: string; content: string }
         if (error instanceof WorkspaceError) throw new ToolExecutionError(error.code, error.message, false);
         throw error;
       }
+      invalidateQualityGates(context);
       return { path: relative, bytesWritten: Buffer.byteLength(args.content), diffSummary: diffSummary(before, args.content) };
     });
   },
@@ -208,6 +209,7 @@ export const fsPatchTool: ServerToolDefinition<{ path: string; oldText: string; 
       const after = args.replaceAll ? before.content.split(args.oldText).join(args.newText) : before.content.replace(args.oldText, args.newText);
       validateManifestWrite(args.path, after);
       safeWriteFile(context.workspaceDir, relative, after);
+      invalidateQualityGates(context);
       const replaced = args.replaceAll ? before.content.split(args.oldText).length - 1 : 1;
       return { path: relative, replaced, diffSummary: diffSummary(before.content, after) };
     });
@@ -219,7 +221,7 @@ export const fsStatTool: ServerToolDefinition<{ path: string }, { path: string; 
   description: "返回文件/目录元信息（lstat，不跟随符号链接）。",
   argsSchema: fsStatArgsSchema,
   resultSchema: fsStatResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -260,6 +262,7 @@ export const fsDeleteTool: ServerToolDefinition<{ path: string; soft: boolean },
       } else {
         rmSync(resolved, { recursive: true, force: true }); // rm deletes entries, never follows links
       }
+      invalidateQualityGates(context);
       return { path: relative, soft: args.soft };
     });
   },
@@ -278,6 +281,7 @@ export const fsCreateDirTool: ServerToolDefinition<{ path: string }, { path: str
     return withWorkspaceLock(context.workspaceDir, async () => {
       const { resolved, relative } = jail(context, args.path);
       mkdirParentsVerified(context.workspaceDir, resolved);
+      invalidateQualityGates(context);
       return { path: relative };
     });
   },
@@ -300,6 +304,7 @@ export const fsCopyTool: ServerToolDefinition<{ from: string; to: string }, { fr
       if (lstatSync(from.resolved).isDirectory()) throw new ToolExecutionError("PATH_ESCAPE", "源路径是目录，请使用文件路径", false);
       mkdirParentsVerified(context.workspaceDir, path.dirname(to.resolved));
       copyFileSync(from.resolved, to.resolved);
+      invalidateQualityGates(context);
       return { from: from.relative, to: to.relative };
     });
   },
@@ -322,6 +327,7 @@ export const fsMoveTool: ServerToolDefinition<{ from: string; to: string }, { fr
       if (!existsSync(from.resolved)) throw new ToolExecutionError("NOT_FOUND", "源路径不存在", false);
       mkdirParentsVerified(context.workspaceDir, path.dirname(to.resolved));
       renameSync(from.resolved, to.resolved);
+      invalidateQualityGates(context);
       return { from: from.relative, to: to.relative };
     });
   },

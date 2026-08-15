@@ -86,7 +86,17 @@ export class ArtifactStore {
     const existingId = this.dedup.get(key);
     if (existingId) {
       const existing = this.entries.get(existingId);
-      if (existing) return existing.ref;
+      if (existing) {
+        // Preserve the stable id while recording that this value is the latest emission.
+        this.entries.delete(existingId);
+        this.entries.set(existingId, existing);
+        try {
+          this.persist?.(this.exportEntries());
+        } catch {
+          // Persistence failure must not fail the run
+        }
+        return existing.ref;
+      }
     }
     const id = "art-" + randomUUID();
     const ref: ArtifactRef = {
@@ -121,7 +131,7 @@ export class ArtifactStore {
     let latest: ArtifactRef | null = null;
     for (const entry of this.entries.values()) {
       if (entry.ref.kind !== kind) continue;
-      if (!latest || entry.ref.id > latest.id) latest = entry.ref;
+      latest = entry.ref;
     }
     return latest;
   }

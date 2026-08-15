@@ -53,7 +53,7 @@ export function PreviewToolbar() {
       </div>
       <button
         type="button"
-        aria-label="重新读取当前 AppSpec"
+        aria-label="刷新当前预览"
         title="刷新预览（重建沙盒会话并重新读取数据库，不重新调用 AI）"
         data-testid="preview-refresh"
         onClick={refreshPreview}

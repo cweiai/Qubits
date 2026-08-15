@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Braces, ChartColumn, ChevronDown, ChevronRight, Compass, Globe, Lightbulb, ShieldCheck, UserRound, type LucideIcon } from "lucide-react";
+import { Braces, ChevronDown, ChevronRight, Lightbulb, UserRound, type LucideIcon } from "lucide-react";
 import { ROLE_META, type RoleId } from "@/lib/contracts/agent-events";
 import { type ConversationMessage, type RoleStatus } from "@/lib/contracts/conversation";
 import { cn } from "@/lib/utils";
@@ -9,12 +9,7 @@ import { cn } from "@/lib/utils";
 const ROLE_ICONS: Record<RoleId, LucideIcon> = {
   team_leader: UserRound,
   product_manager: Lightbulb,
-  researcher: Globe,
-  architect: Compass,
   engineer: Braces,
-  data_scientist: ChartColumn,
-  reviewer: ShieldCheck,
-  security_reviewer: ShieldCheck,
 };
 
 export function RoleMessage({ message }: { message: ConversationMessage }) {

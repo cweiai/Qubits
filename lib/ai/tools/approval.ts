@@ -1,71 +1,69 @@
 import "server-only";
-import type { ServerToolDefinition, ToolExecutionContext } from "./types";
+import type { ToolExecutionContext } from "./types";
 import { ToolExecutionError } from "./types";
-import { requestApprovalArgsSchema, requestApprovalResultSchema } from "./schemas";
+import { getRepository } from "@/lib/db";
 
 /**
- * Approval: high-risk tools (fs_delete/delete_record/run_migration etc.)
- * must first be authorized via request_user_approval or execution returns APPROVAL_REQUIRED.
- * Grants are isolated per runId in a server-side in-memory ApprovalStore.
+ * Approval: high-risk tools (filesystem deletion and destructive data operations)
+ * must first be authorized by a durable user decision. Pending requests are stored in
+ * SQLite and polled by the active Agent; missing, denied, expired, or aborted decisions
+ * all fail closed.
  */
+const APPROVAL_TTL_MS = 5 * 60 * 1000;
 
-interface ApprovalGrant {
-  approvalId: string;
-  runId: string;
-  toolName: string;
-  grantedAt: number;
-}
-
-const grants = new Map<string, ApprovalGrant>();
-
-export function createApproval(runId: string, toolName: string): string {
+export function createApproval(runId: string, toolName: string, options: { projectId?: string | null; taskId?: string | null; toolCallId?: string | null; reason?: string } = {}): string {
   const approvalId = "apv-" + crypto.randomUUID();
-  grants.set(approvalId, { approvalId, runId, toolName, grantedAt: 0 });
+  getRepository().createApproval({
+    id: approvalId,
+    projectId: options.projectId ?? null,
+    taskId: options.taskId ?? null,
+    toolCallId: options.toolCallId ?? null,
+    runId,
+    toolName,
+    reason: (options.reason ?? "高风险工具需要用户明确批准").slice(0, 400),
+    expiresAt: Date.now() + APPROVAL_TTL_MS,
+  });
   return approvalId;
 }
 
-export function grantApproval(approvalId: string): ApprovalGrant | null {
-  const grant = grants.get(approvalId);
-  if (!grant) return null;
-  const updated = { ...grant, grantedAt: Date.now() };
-  grants.set(approvalId, updated);
-  return updated;
+export function grantApproval(approvalId: string): ReturnType<ReturnType<typeof getRepository>["resolveApproval"]> {
+  return getRepository().resolveApproval(approvalId, "granted", "user");
 }
 
-export function isApproved(runId: string, toolName: string): boolean {
-  for (const grant of grants.values()) {
-    if (grant.runId === runId && grant.toolName === toolName && grant.grantedAt > 0) return true;
-  }
-  return false;
+export function denyApproval(approvalId: string): ReturnType<ReturnType<typeof getRepository>["resolveApproval"]> {
+  return getRepository().resolveApproval(approvalId, "denied", "user");
 }
 
 export function resetApprovalsForTests(): void {
-  grants.clear();
+  getRepository().clearApprovalsForTests();
 }
 
-export const requestUserApprovalTool: ServerToolDefinition<{ toolName: string; reason: string }, { approvalId: string; toolName: string; status: "pending" | "granted" }> = {
-  name: "request_user_approval",
-  description: "为高风险工具申请用户审批（返回 approvalId，UI 展示审批对话框）。",
-  argsSchema: requestApprovalArgsSchema,
-  resultSchema: requestApprovalResultSchema,
-  allowedRoles: ["team_leader", "engineer"],
-  risk: "low",
-  requiresApproval: false,
-  async execute(args, context) {
-    const approvalId = createApproval(context.runId, args.toolName);
-    context.emit({
-      type: "approval_requested",
-      approvalId,
-      toolCallId: "tc-approval",
-      toolName: args.toolName,
-      reason: args.reason.slice(0, 400),
+export function isApproved(runId: string, toolName: string): boolean {
+  return getRepository().getLatestApproval(runId, toolName)?.status === "granted";
+}
+
+export async function waitForApproval(approvalId: string, signal: AbortSignal, timeoutMs = APPROVAL_TTL_MS): Promise<"granted"> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (signal.aborted) {
+      const error = new Error("审批等待已取消");
+      error.name = "AbortError";
+      throw error;
+    }
+    const approval = getRepository().getApproval(approvalId);
+    if (!approval) throw new ToolExecutionError("APPROVAL_NOT_FOUND", "审批请求不存在", false);
+    if (approval.status === "granted") return "granted";
+    if (approval.status === "denied") throw new ToolExecutionError("APPROVAL_DENIED", "用户拒绝了该高风险操作", false);
+    if (approval.status === "expired") throw new ToolExecutionError("APPROVAL_EXPIRED", "审批已过期，操作被拒绝", false);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 250);
+      signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
     });
-    const granted = isApproved(context.runId, args.toolName);
-    return { approvalId, toolName: args.toolName, status: granted ? "granted" : "pending" };
-  },
-};
+  }
+  throw new ToolExecutionError("APPROVAL_EXPIRED", "审批等待超时，操作被拒绝", false);
+}
 
 export function assertApproved(context: ToolExecutionContext, toolName: string): void {
   if (context.approvedTools.has(toolName) || isApproved(context.runId, toolName)) return;
-  throw new ToolExecutionError("APPROVAL_REQUIRED", "工具 " + toolName + " 需要用户审批（请先调用 request_user_approval）", true);
+  throw new ToolExecutionError("APPROVAL_REQUIRED", "工具 " + toolName + " 需要用户审批", true);
 }

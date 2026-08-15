@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import type { ArtifactKind } from "@/lib/ai/tools/types";
+import type { RoleId } from "@/lib/contracts/agent-events";
 
 /**
  * Data repository: node:sqlite implementation (a real file database, the server's single entry point).
@@ -115,7 +117,29 @@ export interface ArtifactRow {
   kind: string;
   name: string;
   content: string;
+  createdBy: string | null;
+  parentAgentRunId: string | null;
+  schemaVersion: number | null;
+  sizeBytes: number | null;
+  artifactOrder: number | null;
   createdAt: number;
+}
+
+export type ApprovalStatus = "pending" | "granted" | "denied" | "expired";
+
+export interface ApprovalRow {
+  id: string;
+  projectId: string | null;
+  taskId: string | null;
+  runId: string;
+  toolCallId: string | null;
+  toolName: string;
+  reason: string;
+  status: ApprovalStatus;
+  createdAt: number;
+  expiresAt: number;
+  resolvedAt: number | null;
+  resolvedBy: string | null;
 }
 
 const SCHEMA_PATH = path.join(process.cwd(), "lib", "db", "schema.sql");
@@ -153,6 +177,10 @@ export class AppRepository {
     if (!taskNames.has("agent_runs_json")) this.db.exec("ALTER TABLE build_tasks ADD COLUMN agent_runs_json TEXT");
     if (!taskNames.has("tool_events_json")) this.db.exec("ALTER TABLE build_tasks ADD COLUMN tool_events_json TEXT");
     if (!taskNames.has("attempts")) this.db.exec("ALTER TABLE build_tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");
+    const approvalColumns = this.db.prepare("PRAGMA table_info(approvals)").all() as Array<{ name: string }>;
+    if (!new Set(approvalColumns.map((c) => c.name)).has("tool_call_id")) {
+      this.db.exec("ALTER TABLE approvals ADD COLUMN tool_call_id TEXT");
+    }
     // Per-conversation app-state columns.
     const convColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>;
     const convNames = new Set(convColumns.map((c) => c.name));
@@ -160,6 +188,13 @@ export class AppRepository {
     if (!convNames.has("current_snapshot_id")) this.db.exec("ALTER TABLE conversations ADD COLUMN current_snapshot_id TEXT");
     if (!convNames.has("preview_bundle_id")) this.db.exec("ALTER TABLE conversations ADD COLUMN preview_bundle_id TEXT");
     if (!convNames.has("preview_version")) this.db.exec("ALTER TABLE conversations ADD COLUMN preview_version INTEGER NOT NULL DEFAULT 0");
+    const artifactColumns = this.db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
+    const artifactNames = new Set(artifactColumns.map((c) => c.name));
+    if (!artifactNames.has("created_by")) this.db.exec("ALTER TABLE artifacts ADD COLUMN created_by TEXT");
+    if (!artifactNames.has("parent_agent_run_id")) this.db.exec("ALTER TABLE artifacts ADD COLUMN parent_agent_run_id TEXT");
+    if (!artifactNames.has("schema_version")) this.db.exec("ALTER TABLE artifacts ADD COLUMN schema_version INTEGER");
+    if (!artifactNames.has("size_bytes")) this.db.exec("ALTER TABLE artifacts ADD COLUMN size_bytes INTEGER");
+    if (!artifactNames.has("artifact_order")) this.db.exec("ALTER TABLE artifacts ADD COLUMN artifact_order INTEGER");
   }
 
   private mapConversation(row: Record<string, unknown>): ConversationRow {
@@ -431,7 +466,9 @@ export class AppRepository {
     if (!conversation || conversation.projectId !== projectId) return false;
     this.db.exec("BEGIN");
     try {
+      const taskIds = this.db.prepare("SELECT id FROM build_tasks WHERE conversation_id = ?").all(id) as Array<{ id: string }>;
       this.db.prepare("DELETE FROM build_tasks WHERE conversation_id = ?").run(id);
+      for (const task of taskIds) this.db.prepare("DELETE FROM approvals WHERE task_id = ?").run(task.id);
       this.db.prepare("DELETE FROM conversation_messages WHERE conversation_id = ?").run(id);
       this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
       this.db.exec("COMMIT");
@@ -614,10 +651,9 @@ export class AppRepository {
         input.userMessageId,
         input.prompt,
         JSON.stringify({
+          team_leader: { status: "pending", summary: null, startedAt: null, completedAt: null },
           product_manager: { status: "pending", summary: null, startedAt: null, completedAt: null },
-          architect: { status: "pending", summary: null, startedAt: null, completedAt: null },
           engineer: { status: "pending", summary: null, startedAt: null, completedAt: null },
-          security_reviewer: { status: "pending", summary: null, startedAt: null, completedAt: null },
         }),
         input.requestId,
         now,
@@ -708,6 +744,7 @@ export class AppRepository {
         "UPDATE build_tasks SET status = 'failed', stage = 'failed', error_code = 'STALE', error_message = '会话中断（页面刷新或连接断开），可重试。', updated_at = ? WHERE project_id = ? AND status = 'running' AND updated_at < ?"
       )
       .run(Date.now(), projectId, staleBefore);
+    this.db.prepare("UPDATE approvals SET status = 'expired', resolved_at = ? WHERE project_id = ? AND status = 'pending'").run(Date.now(), projectId);
     return Number(result.changes ?? 0);
   }
 
@@ -727,6 +764,7 @@ export class AppRepository {
       this.db.prepare("DELETE FROM app_records WHERE project_id = ?").run(projectId);
       this.db.prepare("DELETE FROM code_snapshots WHERE project_id = ?").run(projectId);
       this.db.prepare("DELETE FROM artifacts WHERE project_id = ?").run(projectId);
+      this.db.prepare("DELETE FROM approvals WHERE project_id = ?").run(projectId);
       this.db
         .prepare(
           "UPDATE projects SET app_spec_json = NULL, product_brief_json = NULL, app_blueprint_json = NULL, manifest_json = NULL, current_snapshot_id = NULL, preview_bundle_id = NULL, preview_version = 0, updated_at = ? WHERE id = ?"
@@ -950,6 +988,23 @@ export class AppRepository {
 
   // ── Persisted artifacts ──
 
+  private mapArtifact(row: Record<string, unknown>): ArtifactRow {
+    return {
+      id: row.id as string,
+      projectId: row.project_id as string,
+      taskId: (row.task_id as string | null) ?? null,
+      kind: row.kind as string,
+      name: row.name as string,
+      content: row.content as string,
+      createdBy: (row.created_by as string | null) ?? null,
+      parentAgentRunId: (row.parent_agent_run_id as string | null) ?? null,
+      schemaVersion: row.schema_version == null ? null : Number(row.schema_version),
+      sizeBytes: row.size_bytes == null ? null : Number(row.size_bytes),
+      artifactOrder: row.artifact_order == null ? null : Number(row.artifact_order),
+      createdAt: Number(row.created_at),
+    };
+  }
+
   insertArtifact(input: {
     id: string;
     projectId: string;
@@ -962,7 +1017,7 @@ export class AppRepository {
     this.db
       .prepare("INSERT INTO artifacts (id, project_id, task_id, kind, name, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(input.id, input.projectId, input.taskId, input.kind, input.name, input.content, now);
-    return { id: input.id, projectId: input.projectId, taskId: input.taskId, kind: input.kind, name: input.name, content: input.content, createdAt: now };
+    return this.getArtifact(input.id)!;
   }
 
   getArtifact(id: string): ArtifactRow | null {
@@ -970,15 +1025,7 @@ export class AppRepository {
       | Record<string, unknown>
       | undefined;
     if (!row) return null;
-    return {
-      id: row.id as string,
-      projectId: row.project_id as string,
-      taskId: (row.task_id as string | null) ?? null,
-      kind: row.kind as string,
-      name: row.name as string,
-      content: row.content as string,
-      createdAt: Number(row.created_at),
-    };
+    return this.mapArtifact(row);
   }
 
   getLatestArtifact(projectId: string, kind: string): ArtifactRow | null {
@@ -986,15 +1033,7 @@ export class AppRepository {
       .prepare("SELECT * FROM artifacts WHERE project_id = ? AND kind = ? ORDER BY created_at DESC LIMIT 1")
       .get(projectId, kind) as Record<string, unknown> | undefined;
     if (!row) return null;
-    return {
-      id: row.id as string,
-      projectId: row.project_id as string,
-      taskId: (row.task_id as string | null) ?? null,
-      kind: row.kind as string,
-      name: row.name as string,
-      content: row.content as string,
-      createdAt: Number(row.created_at),
-    };
+    return this.mapArtifact(row);
   }
 
   /** Latest artifact for a conversation (joined through build_tasks). */
@@ -1005,15 +1044,60 @@ export class AppRepository {
       )
       .get(projectId, kind, conversationId) as Record<string, unknown> | undefined;
     if (!row) return null;
-    return {
-      id: row.id as string,
-      projectId: row.project_id as string,
-      taskId: (row.task_id as string | null) ?? null,
-      kind: row.kind as string,
-      name: row.name as string,
-      content: row.content as string,
-      createdAt: Number(row.created_at),
-    };
+    return this.mapArtifact(row);
+  }
+
+  /** Persist the orchestrator's run-scoped artifact entries without a local JSON sidecar. */
+  upsertArtifactEntries(taskId: string, projectId: string, entries: Array<{
+    ref: { id: string; kind: string; createdBy: string; parentAgentRunId: string | null; schemaVersion: number; size: number };
+    value: unknown;
+  }>): void {
+    const now = Date.now();
+    const statement = this.db.prepare(
+      "INSERT INTO artifacts (id, project_id, task_id, kind, name, content, created_by, parent_agent_run_id, schema_version, size_bytes, artifact_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content, kind = excluded.kind, name = excluded.name, created_by = excluded.created_by, parent_agent_run_id = excluded.parent_agent_run_id, schema_version = excluded.schema_version, size_bytes = excluded.size_bytes, artifact_order = excluded.artifact_order, created_at = excluded.created_at"
+    );
+    this.transaction(() => {
+      entries.forEach((entry, index) => {
+        statement.run(
+          entry.ref.id,
+          projectId,
+          taskId,
+          entry.ref.kind,
+          entry.ref.kind,
+          JSON.stringify(entry.value),
+          entry.ref.createdBy,
+          entry.ref.parentAgentRunId,
+          entry.ref.schemaVersion,
+          entry.ref.size,
+          index,
+          now + index,
+        );
+      });
+    });
+  }
+
+  /** Restore only orchestrator entries; UI-only artifacts without ref metadata are ignored. */
+  listArtifactEntries(taskId: string): Array<{ ref: { id: string; kind: ArtifactKind; createdBy: RoleId; parentAgentRunId: string | null; schemaVersion: number; size: number }; value: unknown }> {
+    const rows = this.db.prepare("SELECT * FROM artifacts WHERE task_id = ? AND created_by IS NOT NULL ORDER BY artifact_order ASC, created_at ASC, id ASC").all(taskId) as Array<Record<string, unknown>>;
+    const entries: Array<{ ref: { id: string; kind: ArtifactKind; createdBy: RoleId; parentAgentRunId: string | null; schemaVersion: number; size: number }; value: unknown }> = [];
+    for (const row of rows) {
+      try {
+        entries.push({
+          ref: {
+            id: row.id as string,
+            kind: row.kind as ArtifactKind,
+            createdBy: row.created_by as RoleId,
+            parentAgentRunId: (row.parent_agent_run_id as string | null) ?? null,
+            schemaVersion: Number(row.schema_version ?? 1),
+            size: Number(row.size_bytes ?? 0),
+          },
+          value: JSON.parse(row.content as string) as unknown,
+        });
+      } catch {
+        // Ignore corrupted entries; the next run will regenerate them.
+      }
+    }
+    return entries;
   }
 
   deleteProjectArtifacts(projectId: string): void {
@@ -1022,6 +1106,81 @@ export class AppRepository {
 
   deleteProjectSnapshots(projectId: string): void {
     this.db.prepare("DELETE FROM code_snapshots WHERE project_id = ?").run(projectId);
+  }
+
+  // ── Durable tool approvals ──
+
+  private mapApproval(row: Record<string, unknown>): ApprovalRow {
+    return {
+      id: row.id as string,
+      projectId: (row.project_id as string | null) ?? null,
+      taskId: (row.task_id as string | null) ?? null,
+      runId: row.run_id as string,
+      toolCallId: (row.tool_call_id as string | null) ?? null,
+      toolName: row.tool_name as string,
+      reason: row.reason as string,
+      status: row.status as ApprovalStatus,
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+      resolvedAt: row.resolved_at == null ? null : Number(row.resolved_at),
+      resolvedBy: (row.resolved_by as string | null) ?? null,
+    };
+  }
+
+  createApproval(input: {
+    id: string;
+    projectId: string | null;
+    taskId: string | null;
+    runId: string;
+    toolCallId?: string | null;
+    toolName: string;
+    reason: string;
+    expiresAt: number;
+  }): ApprovalRow {
+    const now = Date.now();
+    this.db.prepare(
+      "INSERT INTO approvals (id, project_id, task_id, run_id, tool_call_id, tool_name, reason, status, created_at, expires_at, resolved_at, resolved_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NULL, NULL)"
+    ).run(input.id, input.projectId, input.taskId, input.runId, input.toolCallId ?? null, input.toolName, input.reason, now, input.expiresAt);
+    return this.getApproval(input.id)!;
+  }
+
+  getApproval(id: string): ApprovalRow | null {
+    const row = this.db.prepare("SELECT * FROM approvals WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    if (row.status === "pending" && Number(row.expires_at) <= Date.now()) {
+      this.db.prepare("UPDATE approvals SET status = 'expired', resolved_at = ? WHERE id = ? AND status = 'pending'").run(Date.now(), id);
+      row.status = "expired";
+      row.resolved_at = Date.now();
+    }
+    return this.mapApproval(row);
+  }
+
+  resolveApproval(id: string, status: "granted" | "denied", resolvedBy: string | null = null): ApprovalRow | null {
+    const current = this.getApproval(id);
+    if (!current || current.status !== "pending") return null;
+    const now = Date.now();
+    this.db.prepare("UPDATE approvals SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'pending'").run(status, now, resolvedBy, id);
+    return this.getApproval(id);
+  }
+
+  getLatestApproval(runId: string, toolName: string): ApprovalRow | null {
+    const rows = this.db.prepare("SELECT * FROM approvals WHERE run_id = ? AND tool_name = ? ORDER BY created_at DESC LIMIT 1").all(runId, toolName) as Array<Record<string, unknown>>;
+    if (rows.length === 0) return null;
+    return this.getApproval(rows[0].id as string);
+  }
+
+  listPendingApprovals(taskId: string): ApprovalRow[] {
+    const rows = this.db.prepare("SELECT * FROM approvals WHERE task_id = ? AND status = 'pending' ORDER BY created_at ASC").all(taskId) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.getApproval(row.id as string)).filter((row): row is ApprovalRow => row !== null && row.status === "pending");
+  }
+
+  expirePendingApprovals(taskId: string): number {
+    const result = this.db.prepare("UPDATE approvals SET status = 'expired', resolved_at = ? WHERE task_id = ? AND status = 'pending'").run(Date.now(), taskId);
+    return Number(result.changes ?? 0);
+  }
+
+  clearApprovalsForTests(): void {
+    this.db.exec("DELETE FROM approvals");
   }
 
   close(): void {

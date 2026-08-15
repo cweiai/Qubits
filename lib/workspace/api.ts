@@ -119,11 +119,23 @@ export interface TaskJson {
   updatedAt: number;
 }
 
-interface ConversationDetail {
+export interface ApprovalJson {
+  approvalId: string;
+  taskId: string | null;
+  toolCallId: string | null;
+  toolName: string;
+  reason: string;
+  status: "pending" | "granted" | "denied" | "expired";
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface ConversationDetail {
   conversation: ConversationSummary;
   messages: MessageJson[];
   tasks: TaskJson[];
   messageCount: number;
+  pendingApprovals: ApprovalJson[];
 }
 
 export const api = {
@@ -175,6 +187,11 @@ export const api = {
     request<{ sections: LogSection[]; version: number | null }>(
       `/api/projects/current/logs?conversationId=${encodeURIComponent(conversationId)}`
     ),
+  resolveApproval: (approvalId: string, decision: "grant" | "deny") =>
+    request<{ approvalId: string; status: string }>(`/api/approvals/${encodeURIComponent(approvalId)}`, {
+      method: "POST",
+      body: JSON.stringify({ decision }),
+    }),
 };
 
 export function friendlyError(error: unknown): string {

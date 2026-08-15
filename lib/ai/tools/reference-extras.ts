@@ -25,7 +25,7 @@ export const listReferencesTool: ServerToolDefinition<Record<string, never>, { r
   description: "列出当前 run 已保存的参考来源。",
   argsSchema: z.object({}).strict(),
   resultSchema: listRefsResultSchema,
-  allowedRoles: ["researcher", "team_leader", "reviewer"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
@@ -38,7 +38,7 @@ export const saveReferenceTool: ServerToolDefinition<{ resultId: string }, { sav
   description: "把搜索结果加入当前 run 的参考 artifact。",
   argsSchema: z.object({ resultId: z.string().min(1).max(64) }),
   resultSchema: z.object({ saved: z.boolean() }),
-  allowedRoles: ["researcher"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -51,7 +51,7 @@ export const saveReferenceTool: ServerToolDefinition<{ resultId: string }, { sav
     saved.add(args.resultId);
     context.artifacts.put({
       kind: "reference",
-      createdBy: "researcher",
+      createdBy: "team_leader",
       parentAgentRunId: context.parentAgentRunId,
       value: { results: existing.filter((r) => saved.has(r.resultId)) },
     });
@@ -64,7 +64,7 @@ export const summarizeReferencesTool: ServerToolDefinition<Record<string, never>
   description: "汇总当前 run 参考来源的摘要（基于已保存结果）。",
   argsSchema: z.object({}).strict(),
   resultSchema: z.object({ summary: z.string().max(2000), count: z.number().int() }),
-  allowedRoles: ["researcher", "team_leader"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
@@ -79,7 +79,7 @@ export const verifyReferenceTool: ServerToolDefinition<{ resultId: string }, { r
   description: "校验参考链接可访问性（仅 https，受控请求）。",
   argsSchema: z.object({ resultId: z.string().min(1).max(64) }),
   resultSchema: z.object({ resultId: z.string(), reachable: z.boolean(), status: z.number().nullable() }),
-  allowedRoles: ["researcher"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -101,7 +101,7 @@ function intentTool(name: string, intent: "product" | "ui" | "technical" | "comp
     description,
     argsSchema: z.object({ query: z.string().min(2).max(400), maxResults: z.number().int().min(1).max(8).default(5) }),
     resultSchema: z.object({ results: z.array(z.unknown()).max(8), artifactId: z.string() }),
-    allowedRoles: ["researcher"],
+    allowedRoles: ["team_leader"],
     risk: "low",
     requiresApproval: false,
     async execute(args, context) {
@@ -119,7 +119,7 @@ export const extractReferenceContentTool: ServerToolDefinition<{ resultId: strin
   description: "提取已打开来源的正文（不可信外部内容）。",
   argsSchema: z.object({ resultId: z.string().min(1).max(64), maxChars: z.number().int().min(500).max(12000).default(6000) }),
   resultSchema: z.object({ resultId: z.string(), untrustedContent: z.string().max(14000) }),
-  allowedRoles: ["researcher"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {

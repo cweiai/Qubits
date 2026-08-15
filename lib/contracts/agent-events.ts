@@ -12,12 +12,7 @@ import { qubitsManifestSchema } from "./manifest";
 export const roleIdSchema = z.enum([
   "team_leader",
   "product_manager",
-  "researcher",
-  "architect",
   "engineer",
-  "data_scientist",
-  "reviewer",
-  "security_reviewer", // legacy data compatibility
 ]);
 export type RoleId = z.infer<typeof roleIdSchema>;
 
@@ -37,20 +32,6 @@ export const ROLE_META: Record<RoleId, { id: RoleId; name: string; title: string
     responsibility: "把愿景转化为 PRD、用户旅程、目标与优先级",
     accent: "bg-violet-500",
   },
-  researcher: {
-    id: "researcher",
-    name: "艾瑞斯",
-    title: "研究员",
-    responsibility: "通过受控搜索收集市场、用户与竞品参考，输出带来源报告",
-    accent: "bg-cyan-600",
-  },
-  architect: {
-    id: "architect",
-    name: "鲍勃",
-    title: "系统架构师",
-    responsibility: "设计与 Qubits 能力匹配的可靠技术蓝图",
-    accent: "bg-amber-500",
-  },
   engineer: {
     id: "engineer",
     name: "亚历克斯",
@@ -58,41 +39,16 @@ export const ROLE_META: Record<RoleId, { id: RoleId; name: string; title: string
     responsibility: "通过 workspace 工具编写真实 React/TypeScript 代码并构建验证",
     accent: "bg-emerald-500",
   },
-  data_scientist: {
-    id: "data_scientist",
-    name: "大卫",
-    title: "数据科学家",
-    responsibility: "通过受控工具分析结构化数据，输出可验证的数据洞察",
-    accent: "bg-orange-500",
-  },
-  reviewer: {
-    id: "reviewer",
-    name: "小卫",
-    title: "安全评审员（内部）",
-    responsibility: "内部质量与安全审查，输出 approved 或结构化 issues",
-    accent: "bg-rose-500",
-    internal: true,
-  },
-  security_reviewer: {
-    id: "security_reviewer",
-    name: "小卫",
-    title: "安全评审员（旧）",
-    responsibility: "旧版本兼容映射",
-    accent: "bg-rose-400",
-    internal: true,
-  },
 };
 
 export const ROLE_RUNNING_TEXT: Record<RoleId, string> = {
   team_leader: "正在理解需求并决定任务分配…",
   product_manager: "正在把愿景转化为产品简报…",
-  researcher: "正在搜索并整理参考资料…",
-  architect: "正在设计应用蓝图…",
   engineer: "正在编写并验证应用代码…",
-  data_scientist: "正在分析结构化数据…",
-  reviewer: "正在审校代码与构建报告…",
-  security_reviewer: "正在审校应用…",
 };
+
+export const progressPhaseSchema = z.enum(["planning", "coding", "validating", "previewing"]);
+export type ProgressPhase = z.infer<typeof progressPhaseSchema>;
 
 // Real gateways may return non "tc-" tool call ids (call_xxx / toolu_xxx); strict regexes
 // would silently drop streamed events client-side.
@@ -193,10 +149,12 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     chunk: z.string().max(2000),
   }),
   z.object({
-    type: z.literal("reasoning_delta"),
+    /** Safe, independently generated progress text; raw reasoning is never an event. */
+    type: z.literal("progress_summary"),
     agentRunId,
     roleId: roleIdSchema,
-    delta: z.string().min(1).max(4000),
+    phase: progressPhaseSchema,
+    summary: z.string().min(1).max(240),
   }),
   z.object({
     type: z.literal("tool_call_delta"),

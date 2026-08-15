@@ -21,13 +21,11 @@ import {
 import {
   aggregateRecordsTool, analyzeProjectDataTool as analyzeProjectDataToolV2, checkDataIsolationTool,
   countRecordsTool, createRecordTool, deleteRecordTool, inspectDataSchemaTool, queryRecordsTool,
-  seedDemoDataTool, updateRecordTool, validateDataAccessTool,
+  updateRecordTool, validateDataAccessTool,
 } from "./data";
-import { requestUserApprovalTool } from "./approval";
 import { compareArtifactsTool, createArtifactTool, getArtifactTool } from "./artifacts";
 import { createCheckpointTool, restoreCheckpointTool } from "./version-control";
-import { dependencyAuditTool, reviewChangesTool, secretScanTool, securityReviewTool } from "./security";
-import { createMigrationPlanTool, createShareLinkTool, publishPreviewTool, rollbackReleaseTool, runMigrationTool } from "./release";
+import { dependencyAuditTool, reviewChangesTool, secretScanTool } from "./security";
 import { extractReferenceContentTool, listReferencesTool, saveReferenceTool, searchCompetitorsTool, searchDocsTool, searchUiExamplesTool, summarizeReferencesTool, verifyReferenceTool } from "./reference-extras";
 
 const DEFINITIONS = {
@@ -40,7 +38,6 @@ const DEFINITIONS = {
   create_artifact: createArtifactTool,
   get_artifact: getArtifactTool,
   compare_artifacts: compareArtifactsTool,
-  request_user_approval: requestUserApprovalTool,
   bash: bashTool,
   workspace_init: workspaceInitTool,
   workspace_get_manifest: workspaceGetManifestTool,
@@ -61,18 +58,15 @@ const DEFINITIONS = {
   inspect_data_schema: inspectDataSchemaTool, query_records: queryRecordsTool,
   count_records: countRecordsTool, aggregate_records: aggregateRecordsTool,
   create_record: createRecordTool, update_record: updateRecordTool, delete_record: deleteRecordTool,
-  seed_demo_data: seedDemoDataTool, analyze_project_data: analyzeProjectDataToolV2,
+  analyze_project_data: analyzeProjectDataToolV2,
   validate_data_access: validateDataAccessTool, check_data_isolation: checkDataIsolationTool,
   create_checkpoint: createCheckpointTool, restore_checkpoint: restoreCheckpointTool,
-  review_changes: reviewChangesTool, security_review: securityReviewTool,
+  review_changes: reviewChangesTool,
   secret_scan: secretScanTool, dependency_audit: dependencyAuditTool,
   extract_reference_content: extractReferenceContentTool, search_docs: searchDocsTool,
   search_ui_examples: searchUiExamplesTool, search_competitors: searchCompetitorsTool,
   summarize_references: summarizeReferencesTool, verify_reference: verifyReferenceTool,
   save_reference: saveReferenceTool, list_references: listReferencesTool,
-  create_migration_plan: createMigrationPlanTool, run_migration: runMigrationTool,
-  publish_preview: publishPreviewTool, create_share_link: createShareLinkTool,
-  rollback_release: rollbackReleaseTool,
 } satisfies Record<string, AnyToolDefinition>;
 
 type RegisteredToolName = keyof typeof DEFINITIONS;
@@ -93,7 +87,6 @@ const TOOL_EFFECTS: Record<RegisteredToolName, ToolEffect> = {
   create_artifact: "action",
   get_artifact: "observation",
   compare_artifacts: "observation",
-  request_user_approval: "action",
   bash: "action",
   workspace_init: "action",
   workspace_get_manifest: "observation",
@@ -127,14 +120,12 @@ const TOOL_EFFECTS: Record<RegisteredToolName, ToolEffect> = {
   create_record: "action",
   update_record: "action",
   delete_record: "action",
-  seed_demo_data: "action",
   analyze_project_data: "observation",
   validate_data_access: "observation",
   check_data_isolation: "observation",
   create_checkpoint: "action",
   restore_checkpoint: "action",
   review_changes: "observation",
-  security_review: "observation",
   secret_scan: "observation",
   dependency_audit: "observation",
   extract_reference_content: "observation",
@@ -145,11 +136,6 @@ const TOOL_EFFECTS: Record<RegisteredToolName, ToolEffect> = {
   verify_reference: "observation",
   save_reference: "action",
   list_references: "observation",
-  create_migration_plan: "observation",
-  run_migration: "action",
-  publish_preview: "action",
-  create_share_link: "action",
-  rollback_release: "action",
 };
 
 /**
@@ -161,8 +147,7 @@ const TOOL_EFFECTS: Record<RegisteredToolName, ToolEffect> = {
  */
 const TOOL_PERMISSIONS: Record<RoleId, string[]> = (() => {
   const matrix: Record<RoleId, string[]> = {
-    team_leader: [], product_manager: [], researcher: [], architect: [],
-    engineer: [], data_scientist: [], reviewer: [], security_reviewer: [],
+    team_leader: [], product_manager: [], engineer: [],
   };
   for (const [name, definition] of Object.entries(DEFINITIONS)) {
     for (const role of definition.allowedRoles) {

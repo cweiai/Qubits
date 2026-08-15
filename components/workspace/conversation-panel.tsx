@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Loader2, RotateCw } from "lucide-react";
+import { AlertTriangle, Check, Loader2, RotateCw, ShieldAlert, X } from "lucide-react";
 import { ROLE_META } from "@/lib/contracts/agent-events";
 import { type ConversationMessage } from "@/lib/contracts/conversation";
 import { useWorkspace } from "@/lib/state/workspace-provider";
+import type { ApprovalRequestView } from "@/lib/state/workspace-reducer";
 import { RoleProgress } from "./role-progress";
 import { ToolStageGroup } from "./tool-stage-group";
 import { RoleMessage } from "./role-message";
@@ -104,6 +105,9 @@ export function ConversationPanel() {
           </div>
         ) : null}
         <RoleProgress />
+        {state.pendingApprovals.map((approval) => (
+          <ApprovalCard key={approval.approvalId} approval={approval} />
+        ))}
         {stream.map((item) =>
           item.kind === "message" ? (
             <MessageRow key={item.key} message={item.message} />
@@ -119,11 +123,40 @@ export function ConversationPanel() {
         )}
         {!state.messagesLoading && state.messages.length === 0 ? (
           <p className="py-6 text-center text-xs text-muted-foreground">
-            这是新的对话线程。描述你想要的应用，迈克、艾玛、鲍勃、亚历克斯、大卫、艾瑞斯会依次协作生成。
+            这是新的对话线程。描述你想要的应用，迈克会协调艾玛和亚历克斯完成生成。
           </p>
         ) : null}
       </div>
       <PromptComposer />
+    </div>
+  );
+}
+
+function ApprovalCard({ approval }: { approval: ApprovalRequestView }) {
+  const { resolveApproval } = useWorkspace();
+  const [busy, setBusy] = useState(false);
+  const decide = async (decision: "grant" | "deny") => {
+    if (busy) return;
+    setBusy(true);
+    await resolveApproval(approval.approvalId, decision);
+  };
+  return (
+    <div className="rounded-md border border-amber-300 bg-amber-50 p-3" data-testid="approval-request">
+      <div className="flex items-start gap-2">
+        <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-amber-900">需要审批：{approval.toolName}</p>
+          <p className="mt-1 text-xs leading-relaxed text-amber-800">{approval.reason}</p>
+          <div className="mt-2 flex gap-2">
+            <button type="button" disabled={busy} onClick={() => void decide("grant")} className="inline-flex h-7 items-center gap-1 rounded-md bg-amber-700 px-2.5 text-xs font-medium text-white disabled:opacity-50">
+              <Check className="h-3 w-3" />允许一次
+            </button>
+            <button type="button" disabled={busy} onClick={() => void decide("deny")} className="inline-flex h-7 items-center gap-1 rounded-md border border-amber-300 bg-white px-2.5 text-xs font-medium text-amber-900 disabled:opacity-50">
+              <X className="h-3 w-3" />拒绝
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

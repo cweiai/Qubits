@@ -22,6 +22,17 @@ export interface CheckResult {
   durationMs: number;
 }
 
+/** Preserve the full redacted check result for artifact-backed repair tools. */
+export class WorkspaceCheckError extends WorkspaceError {
+  readonly result: CheckResult;
+  constructor(code: WorkspaceErrorCode, result: CheckResult) {
+    const label = result.summary.split("\n", 1)[0];
+    super(code, (result.log ? label + "\n" + result.log.slice(-2800) : result.summary).slice(0, 3000), true);
+    this.name = "WorkspaceCheckError";
+    this.result = result;
+  }
+}
+
 const HOST = process.cwd();
 const NODE = "node";
 // Toolchain layout inside the container:
@@ -84,10 +95,17 @@ async function runCheck(input: {
     const summary =
       label + "：" + (status === "passed" ? "通过" : status === "timeout" ? "超时" : "失败（exitCode=" + result.exitCode + "）") +
       (log ? "\n" + log.slice(-1200) : "");
+    const checkResult: CheckResult = {
+      status,
+      exitCode: result.exitCode,
+      summary: summary.slice(0, 2000),
+      log,
+      durationMs: result.durationMs,
+    };
     if (status === "failed") {
-      throw new WorkspaceError(errorCode, summary.slice(0, 400), true);
+      throw new WorkspaceCheckError(errorCode, checkResult);
     }
-    return { status, exitCode: result.exitCode, summary: summary.slice(0, 2000), log, durationMs: result.durationMs };
+    return checkResult;
   });
 }
 

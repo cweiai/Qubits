@@ -143,7 +143,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           metadataJson: JSON.stringify({ kind: "error" }),
         });
         migratedMessages += 1;
-      } else if (type === "product_manager" || type === "architect" || type === "engineer" || type === "security_reviewer") {
+      } else if (type === "product_manager" || type === "engineer") {
         repo.insertMessage({
           ...base,
           role: "assistant",

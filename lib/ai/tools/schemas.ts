@@ -3,9 +3,9 @@ import { z } from "zod";
 /** Zod arg/result schemas for each tool (used by the Tool Registry). */
 
 export const delegateToAgentArgsSchema = z.object({
-  targetRole: z.enum(["product_manager", "researcher", "architect", "engineer", "data_scientist", "reviewer"]),
+  targetRole: z.enum(["product_manager", "engineer"]),
   task: z.string().min(1).max(2400),
-  expectedOutput: z.enum(["product_brief", "research_report", "app_blueprint", "code_workspace", "data_report", "review_report"]),
+  expectedOutput: z.enum(["product_brief", "code_workspace"]),
   inputArtifactIds: z.array(z.string().min(8).max(64)).max(12).default([]),
 });
 export const delegateToAgentResultSchema = z.object({
@@ -78,16 +78,6 @@ export const analyzeProjectDataResultSchema = z.object({
   timeRange: z.string().max(80),
 });
 
-export const validateAppSpecArgsSchema = z.object({
-  artifactId: z.string().min(8).max(64),
-});
-export const validateAppSpecResultSchema = z.object({
-  valid: z.boolean(),
-  issues: z.array(
-    z.object({ code: z.string().max(60), path: z.string().max(120), severity: z.enum(["error", "warning"]), message: z.string().max(300) })
-  ).max(20),
-});
-
 export const renderPreviewArgsSchema = z.object({
   artifactId: z.string().min(8).max(64),
   reason: z.enum(["initial_generation", "user_revision", "repair"]),
@@ -149,14 +139,12 @@ export const recordUpdateArgsSchema = z.object({ collection: z.string().min(1).m
 export const recordUpdateResultSchema = z.object({ updated: z.boolean() });
 export const recordDeleteArgsSchema = z.object({ collection: z.string().min(1).max(64), id: z.string().min(1).max(64) });
 export const recordDeleteResultSchema = z.object({ deleted: z.boolean() });
-export const seedDemoDataArgsSchema = z.object({ collection: z.string().min(1).max(64), count: z.number().int().min(1).max(20).default(5) });
-export const seedDemoDataResultSchema = z.object({ seeded: z.number().int() });
 export const dataSchemaResultSchema = z.object({ collections: z.array(z.object({ name: z.string(), fields: z.array(z.object({ name: z.string(), type: z.string(), required: z.boolean() })) })).max(8) });
 export const dataAccessResultSchema = z.object({ valid: z.boolean(), issues: z.array(z.string().max(300)).max(10) });
 
-// ── artifacts/approval/release ──
+// ── artifacts/approval ──
 // create_artifact only stores intermediate "file" attachments; FINAL artifacts
-// (product_brief / app_blueprint / code_workspace / review_report / …) are persisted
+// (product_brief / code_workspace) are persisted
 // exclusively by the orchestrator after finalSchema validation.
 export const createArtifactArgsSchema = z.object({
   kind: z.literal("file"),
@@ -168,8 +156,6 @@ export const getArtifactArgsSchema = z.object({ artifactId: z.string().min(8).ma
 export const getArtifactResultSchema = z.object({ artifactId: z.string(), kind: z.string(), summary: z.string().max(500) });
 export const compareArtifactsArgsSchema = z.object({ aArtifactId: z.string().min(8).max(64), bArtifactId: z.string().min(8).max(64) });
 export const compareArtifactsResultSchema = z.object({ sameKind: z.boolean(), changedKeys: z.array(z.string().max(120)).max(30) });
-export const requestApprovalArgsSchema = z.object({ toolName: z.string().min(1).max(60), reason: z.string().min(1).max(400) });
-export const requestApprovalResultSchema = z.object({ approvalId: z.string(), toolName: z.string(), status: z.enum(["pending", "granted"]) });
 export const notConfiguredResultSchema = z.object({ available: z.literal(false), provider: z.string(), reason: z.string().max(300) });
 export const migrationPlanResultSchema = z.object({ available: z.literal(false), provider: z.string(), reason: z.string().max(300) });
 export const publishResultSchema = z.object({ available: z.literal(false), provider: z.string(), reason: z.string().max(300) });
@@ -205,6 +191,7 @@ export const dependencyListArgsSchema = z.object({}).strict();
 export const dependencyListResultSchema = z.object({
   dependencies: z.array(z.object({ name: z.string(), version: z.string() })).max(12),
   allowlist: z.array(z.object({ name: z.string(), version: z.string() })).max(20),
+  builtIns: z.array(z.string()).max(8),
 });
 export const dependencyAddArgsSchema = z.object({ name: z.string().min(1).max(64), version: z.string().min(1).max(32).optional() });
 export const dependencyAddResultSchema = z.object({ added: z.literal(true), name: z.string(), version: z.string(), dependencies: z.array(z.object({ name: z.string(), version: z.string() })).max(12) });

@@ -25,7 +25,6 @@ export interface SandboxInfo {
   sandboxId: string;
   provider: string;
   workspaceDir: string;
-  demoMode: boolean;
   isProductionSecurityBoundary: boolean;
 }
 
@@ -220,7 +219,6 @@ export class ContainerSandboxProvider implements SandboxProvider {
       sandboxId: "container-" + Math.random().toString(36).slice(2, 10),
       provider: this.kind,
       workspaceDir,
-      demoMode: false,
       isProductionSecurityBoundary: true,
     };
   }
@@ -325,8 +323,8 @@ export class ContainerSandboxProvider implements SandboxProvider {
       });
       child.on("close", (code) => {
         clearTimeout(timer);
-        const processInfo = this.processes.get(child.pid ?? -1);
-        if (processInfo) processInfo.alive = false;
+        // The cap is for concurrent children, not lifetime executions.
+        this.processes.delete(child.pid ?? -1);
         resolve({
           exitCode: timedOut ? 124 : (code ?? 1),
           stdout: stdout.slice(0, MAX_OUTPUT_BYTES),

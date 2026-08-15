@@ -1,15 +1,8 @@
 import "server-only";
 import type { QubitsManifest } from "@/lib/contracts/manifest";
 import type { AgentEvent } from "@/lib/contracts/agent-events";
-import { securityReviewSchema } from "@/lib/contracts/review";
-import {
-  appBlueprintWithSummarySchema,
-  codeWorkspaceSchema,
-  dataReportSchema,
-  productBriefWithSummarySchema,
-  researchReportSchema,
-} from "@/lib/contracts/artifacts";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { codeWorkspaceSchema, productBriefWithSummarySchema } from "@/lib/contracts/artifacts";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import type { ArtifactKind, ChildAgentRequest, ChildAgentResult, DataAdapter, PromoteRunInput, PromoteRunResult, ToolExecutionContext } from "./tools/types";
 import { ArtifactStore, type StoredArtifactEntry } from "./artifact-store";
@@ -30,6 +23,8 @@ import type { z } from "zod";
 
 interface MikeRunInput {
   prompt: string;
+  projectId?: string | null;
+  taskId?: string | null;
   currentManifest: QubitsManifest | null;
   currentAppId: string;
   currentVersion: number;
@@ -41,8 +36,9 @@ interface MikeRunInput {
   dataAdapter?: DataAdapter | null;
   /** Retry context injected by the caller so Mike continues from the failure point. */
   resumeContext?: string | null;
-  /** Artifact persistence file: saves/restores the ArtifactStore across attempts. */
-  artifactFile?: string | null;
+  /** Durable artifact persistence injected by the server repository. */
+  artifactSeed?: StoredArtifactEntry[];
+  persistArtifacts?: (entries: StoredArtifactEntry[]) => void;
   /** Snapshot promotion callback (server-injected; writes the database). */
   promoteRun?: (input: PromoteRunInput) => Promise<PromoteRunResult>;
   /** Test injection: overrides the model provider (timeout/abort semantics). */
@@ -60,16 +56,8 @@ function expectedKind(expectedOutput: string): ArtifactKind {
   switch (expectedOutput) {
     case "product_brief":
       return "product_brief";
-    case "research_report":
-      return "research_report";
-    case "app_blueprint":
-      return "app_blueprint";
     case "code_workspace":
       return "code_workspace";
-    case "data_report":
-      return "data_report";
-    case "review_report":
-      return "review_report";
     default:
       throw new ToolLoopError("INVALID_EXPECTED_OUTPUT", "未知的 expectedOutput：" + String(expectedOutput).slice(0, 60));
   }
@@ -78,11 +66,7 @@ function expectedKind(expectedOutput: string): ArtifactKind {
 /** Final-artifact kind → Zod schema. Persisting a deliverable REQUIRES passing this check. */
 const FINAL_ARTIFACT_SCHEMAS: Record<string, z.ZodType> = {
   product_brief: productBriefWithSummarySchema,
-  research_report: researchReportSchema,
-  app_blueprint: appBlueprintWithSummarySchema,
   code_workspace: codeWorkspaceSchema,
-  data_report: dataReportSchema,
-  review_report: securityReviewSchema,
 };
 
 /** Stable error code → short human label (the full message stays in the summary). */
@@ -123,31 +107,18 @@ function friendlyMessage(error: unknown): { code: string; message: string } {
 export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunResult> {
   const runId = "run-" + crypto.randomUUID();
   const mikeAgentRunId = "agent-" + crypto.randomUUID();
-  const artifactFile = input.artifactFile ?? null;
-  // Retry: restore previous artifacts and persist after each put.
-  let seed: StoredArtifactEntry[] | undefined;
-  if (artifactFile && existsSync(artifactFile)) {
-    try {
-      const parsed = JSON.parse(readFileSync(artifactFile, "utf8")) as unknown;
-      if (Array.isArray(parsed)) seed = parsed as StoredArtifactEntry[];
-    } catch {
-      seed = undefined;
-    }
-  }
-  const artifacts = new ArtifactStore(runId, seed, artifactFile ? (entries) => {
-    try {
-      mkdirSync(path.dirname(artifactFile), { recursive: true });
-      writeFileSync(artifactFile, JSON.stringify(entries));
-    } catch {
-      // Persistence failure must not fail the run
-    }
-  } : undefined);
+  // Retry restores the task's durable entries; every new artifact is persisted immediately.
+  const artifacts = new ArtifactStore(runId, input.artifactSeed, input.persistArtifacts);
   const counters = { toolCalls: 0, childAgents: 0 };
   const workspaceDir = input.workspaceDir ?? path.join(process.cwd(), "data", "workspaces", runId);
   // The route seeds the workspace (snapshot or system skeleton) before the run starts;
   // workspace_init remains idempotent and Alex may still call it.
   const runState = {
-    reviewerApproved: false,
+    quality: {
+      buildPassed: false,
+      testsPassed: false,
+      securityScanPassed: false,
+    },
     previewCommitted: false,
     // workspace_init (called by Alex in a child context) must write through to the run state.
     workspaceReady: existsSync(path.join(workspaceDir, ".qubits-workspace.json")),
@@ -162,17 +133,14 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
     currentManifest: input.currentManifest,
     currentAppId: input.currentAppId,
     currentVersion: input.currentVersion,
+    projectId: input.projectId ?? null,
+    taskId: input.taskId ?? null,
     projectRecords: input.projectRecords,
     dataAdapter: input.dataAdapter ?? null,
     artifacts,
     emit: input.emit,
     childAgentRunner: (request) => runChildAgent(request),
-    get reviewerApproved() {
-      return runState.reviewerApproved;
-    },
-    set reviewerApproved(value: boolean) {
-      runState.reviewerApproved = value;
-    },
+    quality: runState.quality,
     get previewCommitted() {
       return runState.previewCommitted;
     },
@@ -220,12 +188,6 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
       set workspaceReady(value: boolean) {
         runState.workspaceReady = value;
       },
-      get reviewerApproved() {
-        return runState.reviewerApproved;
-      },
-      set reviewerApproved(value: boolean) {
-        runState.reviewerApproved = value;
-      },
       get previewCommitted() {
         return runState.previewCommitted;
       },
@@ -260,12 +222,6 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
         parentAgentRunId: mikeAgentRunId,
         value: result.artifact,
       }).id;
-      if (request.roleId === "reviewer" || request.roleId === "security_reviewer") {
-        const review = securityReviewSchema.safeParse(result.artifact);
-        if (review.success) {
-          runState.reviewerApproved = review.data.approved;
-        }
-      }
       return { status: "completed", artifactId, summary: result.summary, issues: result.issues };
     } catch (error) {
       // Aborts propagate to Mike's loop and the orchestrator maps them to CLIENT_ABORTED.
@@ -306,7 +262,7 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
     // Server-side gate: complete_run is the ONLY completion entry. Mike's final text can
     // never substitute for the preview + completion tool calls.
     if (!runState.previewCommitted) {
-      const message = "[INCOMPLETE_RUN] 运行结束前未成功完成 render_preview + complete_run（构建/评审/预览任一环节未通过）。当前成功版本保持不变。";
+      const message = "[INCOMPLETE_RUN] 运行结束前未成功完成 render_preview + complete_run（构建/测试/安全扫描/预览任一环节未通过）。当前成功版本保持不变。";
       input.emit({ type: "error", roleId: "team_leader", message: message.slice(0, 400), code: "INCOMPLETE_RUN" });
       return { status: "failed", summary: message, suggestions: [] };
     }

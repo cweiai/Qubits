@@ -1,7 +1,7 @@
 import type { AppSpec } from "@/lib/contracts/app-spec";
 
 /**
- * Deterministic security scan (local fallback, double-layered with the AI Reviewer):
+ * Deterministic security scan for generated workspace code:
  * scans all string values in the AppSpec for dangerous patterns plus structural safety constraints.
  * It does not rely on model compliance; any hit blocks publishing and enters the repair loop.
  */

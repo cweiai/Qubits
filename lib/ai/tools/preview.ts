@@ -16,11 +16,11 @@ import { assertWorkspaceTreeSafe, withWorkspaceLock } from "@/lib/workspace/path
 /**
  * render_preview: the only preview submission entry point. It can ONLY accept a
  * successful preview_bundle/build artifact produced by run_build — never an AppSpec —
- * and only after the Reviewer has approved. preview_ready fires only on success.
+ * and only after Alex's deterministic quality gates pass. preview_ready fires only on success.
  */
 export const renderPreviewTool: ServerToolDefinition<z.infer<typeof renderPreviewArgsSchema>, z.infer<typeof renderPreviewResultSchema>> = {
   name: "render_preview",
-  description: "把成功构建的 preview_bundle 提交为可预览产物（唯一入口）。Reviewer 未批准或构建未成功时返回 PREVIEW_BLOCKED，旧预览保持不变。",
+  description: "把成功构建的 preview_bundle 提交为可预览产物（唯一入口）。构建、测试或安全扫描未通过时返回 PREVIEW_BLOCKED，旧预览保持不变。",
   argsSchema: renderPreviewArgsSchema,
   resultSchema: renderPreviewResultSchema,
   allowedRoles: ["team_leader"],
@@ -46,8 +46,8 @@ export const renderPreviewTool: ServerToolDefinition<z.infer<typeof renderPrevie
     if (build?.status !== "success") {
       throw new SearchProviderError("PREVIEW_FAILED", "最近一次构建未成功，不能提交预览");
     }
-    if (!context.reviewerApproved) {
-      throw new SearchProviderError("PREVIEW_BLOCKED", "Reviewer 尚未批准或存在阻断 issue，预览保持旧版本");
+    if (!context.quality.buildPassed || !context.quality.testsPassed || !context.quality.securityScanPassed) {
+      throw new SearchProviderError("PREVIEW_BLOCKED", "最新工作区尚未同时通过构建、测试与安全扫描，预览保持旧版本");
     }
     let manifest;
     try {
@@ -88,19 +88,16 @@ export const completeRunTool: ServerToolDefinition<z.infer<typeof completeRunArg
     if (!context.artifacts.findLatest("product_brief")) {
       throw new SearchProviderError("MISSING_ARTIFACT", "缺少 ProductBrief，不能完成运行");
     }
-    if (!context.artifacts.findLatest("app_blueprint")) {
-      throw new SearchProviderError("MISSING_ARTIFACT", "缺少 AppBlueprint，不能完成运行");
-    }
-    if (!context.artifacts.findLatest("code_workspace") && !context.artifacts.findLatest("preview_bundle")) {
-      throw new SearchProviderError("MISSING_ARTIFACT", "缺少代码工作区产物，不能完成运行");
+    if (!context.artifacts.findLatest("code_workspace")) {
+      throw new SearchProviderError("MISSING_ARTIFACT", "缺少 Engineer 的代码工作区产物，不能完成运行");
     }
     const buildReport = context.artifacts.findLatest("build_report");
     const build = buildReport ? (context.artifacts.get(buildReport.id) as { status?: string } | null) : null;
     if (build?.status !== "success") {
       throw new SearchProviderError("BUILD_REQUIRED", "没有成功的构建报告，不能完成运行");
     }
-    if (!context.reviewerApproved) {
-      throw new SearchProviderError("REVIEW_BLOCKED", "Reviewer 未批准，不能完成运行");
+    if (!context.quality.buildPassed || !context.quality.testsPassed || !context.quality.securityScanPassed) {
+      throw new SearchProviderError("QUALITY_GATE_BLOCKED", "最新工作区没有同时通过构建、测试与安全扫描，不能完成运行");
     }
     if (!context.previewCommitted) {
       throw new SearchProviderError("PREVIEW_REQUIRED", "必须先成功调用 render_preview");
@@ -111,7 +108,7 @@ export const completeRunTool: ServerToolDefinition<z.infer<typeof completeRunArg
         return readWorkspaceManifest(context.workspaceDir);
       });
       const testReport = context.artifacts.findLatest("test_report");
-      const reviewReport = context.artifacts.findLatest("review_report");
+      const securityReport = context.artifacts.findLatest("security_report");
       const preview = context.artifacts.findLatest("preview_bundle");
       await context.promoteRun({
         workspaceDir: context.workspaceDir,
@@ -119,7 +116,7 @@ export const completeRunTool: ServerToolDefinition<z.infer<typeof completeRunArg
         previewArtifactId: preview?.id ?? null,
         buildReport: build,
         testReport: testReport ? context.artifacts.get(testReport.id) : null,
-        reviewReport: reviewReport ? context.artifacts.get(reviewReport.id) : null,
+        reviewReport: securityReport ? context.artifacts.get(securityReport.id) : null,
       });
     }
     context.emit({ type: "run_completed", summary: args.summary, suggestions: args.nextSuggestions });

@@ -1,10 +1,17 @@
 import "server-only";
-import type { AIProvider, AgentTurnResponse, GenerateWithToolsInput } from "./provider";
+import type {
+  AIProvider,
+  AgentTurnResponse,
+  GenerateWithToolsInput,
+  ProgressSummaryInput,
+} from "./provider";
+import type { ProgressPhase, RoleId } from "@/lib/contracts/agent-events";
+import { redactProgressText, sanitizeProgressSummary } from "./progress-summary";
 
 /**
- * OpenAI-compatible provider: calls chat/completions (JSON mode) directly, without the
- * AI SDK. Reads OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL server-side, never
- * exposed to the client.
+ * OpenAI-compatible provider: consumes chat/completions SSE directly, without the AI SDK.
+ * Reads OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL server-side, never exposed to
+ * the client.
  *
  * Stable error contract:
  * - PROVIDER_TIMEOUT: our own request deadline fired without an HTTP response
@@ -13,17 +20,36 @@ import type { AIProvider, AgentTurnResponse, GenerateWithToolsInput } from "./pr
  * - PROVIDER_AUTH_ERROR: HTTP 401 or 403
  * - PROVIDER_BAD_REQUEST: HTTP 400 or a protocol error
  * - PROVIDER_SERVER_ERROR: HTTP 5xx
- * Retry policy: network errors + 408/429/5xx are retried at most twice with exponential
- * backoff + jitter; 400/401/403 and protocol errors never retry; user aborts never retry.
+ * Retry policy: network errors + 408/429/5xx are retried at most twice, while a
+ * side-effect-free provider timeout is retried once; 400/401/403, protocol errors,
+ * and user aborts never retry.
  * Error messages never contain the API key, Authorization header or request body.
  */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
 
-/** Per-request deadline (env-overridable for tests; default 90s). */
-function providerTimeoutMs(): number {
+/** Code tool arguments need more output room than routing and compact structured artifacts. */
+export function readMaxOutputTokens(roleId: RoleId): number {
+  const parsed = Number.parseInt(process.env.QUIBITS_PROVIDER_MAX_TOKENS ?? "", 10);
+  if (Number.isFinite(parsed) && parsed >= 1024 && parsed <= 32_768) return parsed;
+  if (roleId === "engineer") return 16_384;
+  return 4096;
+}
+
+/** Per-request deadline: code generation gets more time than routing and planning. */
+export function readProviderTimeoutMs(roleId: RoleId): number {
   const parsed = Number.parseInt(process.env.QUIBITS_PROVIDER_TIMEOUT_MS ?? "", 10);
-  return Number.isFinite(parsed) && parsed >= 50 ? parsed : 90_000;
+  if (Number.isFinite(parsed) && parsed >= 50) return parsed;
+  if (roleId === "engineer") return 300_000;
+  if (roleId === "team_leader") return 180_000;
+  return 120_000;
+}
+
+/** Progress summaries are deliberately short and isolated from the main model deadline. */
+export function readProgressSummaryTimeoutMs(): number {
+  const parsed = Number.parseInt(process.env.QUIBITS_PROGRESS_SUMMARY_TIMEOUT_MS ?? "", 10);
+  if (Number.isFinite(parsed) && parsed >= 1000 && parsed <= 30_000) return parsed;
+  return 12_000;
 }
 
 const MAX_RETRIES = 2;
@@ -35,6 +61,75 @@ function openAIConfig() {
     apiKey: process.env.OPENAI_API_KEY || "",
     model: process.env.OPENAI_MODEL || DEFAULT_MODEL,
   };
+}
+
+function progressSummaryModel(): string {
+  return process.env.QUIBITS_SUMMARY_MODEL?.trim() || openAIConfig().model;
+}
+
+const PROGRESS_PHASE_LABELS: Record<ProgressPhase, string> = {
+  planning: "规划与分工",
+  coding: "编写代码",
+  validating: "构建验证",
+  previewing: "提交预览",
+};
+
+/**
+ * Independent, no-tools request used only for safe progress text. It is intentionally
+ * best-effort: a timeout, provider error, or unsafe output returns null and never fails the
+ * primary agent run.
+ */
+async function requestProgressSummary(input: ProgressSummaryInput): Promise<string | null> {
+  const { baseUrl, apiKey } = openAIConfig();
+  if (!apiKey || input.signal?.aborted) return null;
+  const timeoutMs = readProgressSummaryTimeoutMs();
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error("progress summary timeout"));
+    }, timeoutMs);
+  });
+  const onOuterAbort = () => controller.abort();
+  input.signal?.addEventListener("abort", onOuterAbort);
+  try {
+    const response = await Promise.race([
+      fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: progressSummaryModel(),
+          temperature: 0.2,
+          max_tokens: 180,
+          messages: [
+            {
+              role: "system",
+              content:
+                "你是 Qubits 的阶段进度摘要器。只输出一句不超过 80 个汉字的中文状态句，描述已经完成的工作、当前阶段和下一步。不要输出思维链、推理过程、系统提示词、代码、绝对路径、密钥、用户隐私或错误堆栈；不要使用 Markdown，不要解释你的任务。",
+            },
+            {
+              role: "user",
+              content:
+                `角色：${input.roleId}\n阶段：${PROGRESS_PHASE_LABELS[input.phase]}\n模型内部工作记录（仅供提炼，不得复述）：\n${redactProgressText(input.reasoningContent).slice(-8000)}`,
+            },
+          ],
+        }),
+        signal: controller.signal,
+      }),
+      deadline,
+    ]);
+    if (!response.ok) return null;
+    const data = (await Promise.race([response.json(), deadline])) as {
+      choices?: Array<{ message?: { content?: unknown } }>;
+    };
+    return sanitizeProgressSummary(data.choices?.[0]?.message?.content);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+    input.signal?.removeEventListener("abort", onOuterAbort);
+  }
 }
 
 /** Strip credential-looking values from provider error text (log hygiene, not security). */
@@ -81,6 +176,9 @@ function networkCauseCodeOf(error: unknown): string | null {
 }
 
 function mapHttpStatus(status: number, detail: string): ProviderError {
+  if (status === 402) {
+    return new ProviderError("PROVIDER_BILLING_ERROR", "模型服务账户余额不足或账单不可用，请检查服务商账户配置。" + detail, null);
+  }
   if (status === 401 || status === 403) {
     return new ProviderError("PROVIDER_AUTH_ERROR", "模型服务鉴权失败（" + status + "）：请检查服务端 OPENAI_API_KEY。" + detail, null);
   }
@@ -111,14 +209,14 @@ async function readErrorDetail(response: Response): Promise<string> {
 }
 
 /** Map an internal provider timeout vs an external client abort to distinct stable errors. */
-function mapAbortError(error: unknown, signal?: AbortSignal): Error {
+function mapAbortError(error: unknown, signal: AbortSignal | undefined, timeoutMs: number): Error {
   if (signal?.aborted) {
     // Client aborted (page refresh / disconnect): keep the AbortError so the orchestrator
     // can emit CLIENT_ABORTED (a different, more specific code than a provider timeout).
     return error instanceof Error ? error : new Error("请求已取消");
   }
   if (error instanceof Error && error.name === "AbortError") {
-    return new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（" + Math.round(providerTimeoutMs() / 1000) + " 秒），请稍后重试。");
+    return new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（" + Math.round(timeoutMs / 1000) + " 秒），请稍后重试。");
   }
   return error instanceof Error ? error : new Error("模型服务请求失败");
 }
@@ -253,7 +351,7 @@ type RawToolCall = {
 
 interface OpenAIToolRequestFields {
   tools?: Array<{ type: "function"; function: GenerateWithToolsInput["tools"][number] }>;
-  tool_choice?: "auto" | { type: "function"; function: { name: string } };
+  tool_choice?: "auto";
 }
 
 /** Build only valid OpenAI tool fields; a final-only turn omits both fields. */
@@ -270,7 +368,9 @@ export function buildToolRequestFields(input: GenerateWithToolsInput): OpenAIToo
   }
   return {
     tools: [selected],
-    tool_choice: { type: "function", function: { name: choice.name } },
+    // Thinking models reject a forced function object. Exposing only the
+    // selected tool keeps the Controller constraint while remaining compatible.
+    tool_choice: "auto",
   };
 }
 
@@ -306,35 +406,190 @@ export function parseProviderToolCalls(raw: unknown): AgentTurnResponse["toolCal
   });
 }
 
+interface StreamingToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+interface StreamAccumulator {
+  content: string[];
+  reasoning: string[];
+  toolCalls: Map<number, StreamingToolCall>;
+  sawChoice: boolean;
+}
+
+function applyStreamPayload(
+  payload: string,
+  accumulator: StreamAccumulator,
+  onReasoningDelta?: (delta: string) => void,
+): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    throw new ToolMessageProtocolError("模型返回了无法解析的流式事件");
+  }
+  if (typeof parsed !== "object" || parsed === null) return;
+  const record = parsed as {
+    error?: { message?: unknown };
+    choices?: Array<{
+      delta?: {
+        content?: unknown;
+        reasoning_content?: unknown;
+        tool_calls?: unknown;
+      };
+      message?: {
+        content?: unknown;
+        reasoning_content?: unknown;
+        tool_calls?: unknown;
+      };
+    }>;
+  };
+  if (record.error) {
+    throw new ProviderError(
+      "PROVIDER_SERVER_ERROR",
+      typeof record.error.message === "string" ? record.error.message : "模型流返回错误",
+    );
+  }
+  const choice = record.choices?.[0];
+  if (!choice) return;
+  accumulator.sawChoice = true;
+  const delta = choice.delta ?? choice.message ?? {};
+  if (typeof delta.content === "string") accumulator.content.push(delta.content);
+  if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) {
+    accumulator.reasoning.push(delta.reasoning_content);
+    try {
+      onReasoningDelta?.(delta.reasoning_content);
+    } catch {
+      // The stream consumer is observational and cannot break the provider response.
+    }
+  }
+  if (!Array.isArray(delta.tool_calls)) return;
+  for (let arrayIndex = 0; arrayIndex < delta.tool_calls.length; arrayIndex++) {
+    const raw = delta.tool_calls[arrayIndex];
+    if (typeof raw !== "object" || raw === null) continue;
+    const call = raw as {
+      index?: unknown;
+      id?: unknown;
+      function?: { name?: unknown; arguments?: unknown };
+    };
+    const index = typeof call.index === "number" && Number.isInteger(call.index) ? call.index : arrayIndex;
+    const current = accumulator.toolCalls.get(index) ?? { id: "", name: "", arguments: "" };
+    if (typeof call.id === "string") current.id += call.id;
+    if (typeof call.function?.name === "string") current.name += call.function.name;
+    if (typeof call.function?.arguments === "string") current.arguments += call.function.arguments;
+    accumulator.toolCalls.set(index, current);
+  }
+}
+
+/** Parse OpenAI-compatible SSE without ever forwarding raw reasoning to the client. */
+async function readStreamingTurn(
+  response: Response,
+  input: GenerateWithToolsInput,
+  deadline: Promise<never>,
+): Promise<AgentTurnResponse> {
+  if (!response.body) throw new ProviderError("PROVIDER_SERVER_ERROR", "模型服务返回了空的流式响应。");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const accumulator: StreamAccumulator = {
+    content: [],
+    reasoning: [],
+    toolCalls: new Map(),
+    sawChoice: false,
+  };
+  let buffer = "";
+  let finished = false;
+
+  const processLine = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return;
+    const payload = trimmed.slice(5).trim();
+    if (!payload) return;
+    if (payload === "[DONE]") {
+      finished = true;
+      return;
+    }
+    applyStreamPayload(payload, accumulator, input.onReasoningDelta);
+  };
+
+  while (!finished) {
+    const { done, value } = await Promise.race([reader.read(), deadline]);
+    buffer += decoder.decode(value, { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) processLine(line);
+    if (done) {
+      if (buffer.trim()) processLine(buffer);
+      break;
+    }
+  }
+  try {
+    await reader.cancel();
+  } catch {
+    // The server may already have closed the stream after [DONE].
+  }
+  if (!accumulator.sawChoice) {
+    throw new ProviderError("PROVIDER_SERVER_ERROR", "模型服务未返回有效的流式结果。");
+  }
+  const rawCalls = [...accumulator.toolCalls.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, call]) => ({
+      id: call.id,
+      type: "function",
+      function: { name: call.name, arguments: call.arguments || "{}" },
+    }));
+  const content = accumulator.content.join("");
+  const reasoningContent = accumulator.reasoning.join("");
+  return {
+    content: content || null,
+    reasoningContent: reasoningContent || null,
+    toolCalls: parseProviderToolCalls(rawCalls),
+  };
+}
+
 /** Real tool calling: native tools/tool_calls protocol (not mixed with response_format json_object). */
 /** One chat/completions attempt. Returns parsed turn; throws ProviderError/AbortError/protocol errors. */
 async function attemptChatWithTools(input: GenerateWithToolsInput): Promise<AgentTurnResponse> {
   const { baseUrl, apiKey, model } = openAIConfig();
+  const timeoutMs = readProviderTimeoutMs(input.roleId);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), providerTimeoutMs());
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  // Some OpenAI-compatible gateways do not settle fetch promptly after abort.
+  // Race the whole response lifecycle so the wall-clock deadline is still real.
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（" + Math.round(timeoutMs / 1000) + " 秒）。"));
+    }, timeoutMs);
+  });
   const onOuterAbort = () => controller.abort();
   input.signal?.addEventListener("abort", onOuterAbort);
   try {
     let response: Response;
     try {
       const toolFields = buildToolRequestFields(input);
-      response = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
-          temperature: 0.2,
-          max_tokens: 4096,
-          ...toolFields,
-          messages: buildChatMessages(input.system, input.messages, toolMessageCompatEnabled()),
+      response = await Promise.race([
+        fetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+          body: JSON.stringify({
+            model,
+            temperature: 0.2,
+            max_tokens: readMaxOutputTokens(input.roleId),
+            stream: true,
+            ...toolFields,
+            messages: buildChatMessages(input.system, input.messages, toolMessageCompatEnabled()),
+          }),
+          signal: controller.signal,
         }),
-        signal: controller.signal,
-      });
+        deadline,
+      ]);
     } catch (error) {
       // Map connection, DNS, and abort failures to stable provider errors.
       if (input.signal?.aborted) throw error; // user abort: no retry, CLIENT_ABORTED upstream
       if (error instanceof Error && error.name === "AbortError") {
-        throw new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（" + Math.round(providerTimeoutMs() / 1000) + " 秒）。");
+        throw new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（" + Math.round(timeoutMs / 1000) + " 秒）。");
       }
       if (error instanceof TypeError) {
         const causeCode = networkCauseCodeOf(error);
@@ -347,9 +602,12 @@ async function attemptChatWithTools(input: GenerateWithToolsInput): Promise<Agen
       throw error;
     }
     if (!response.ok) {
-      throw mapHttpStatus(response.status, await readErrorDetail(response));
+      throw mapHttpStatus(response.status, await Promise.race([readErrorDetail(response), deadline]));
     }
-    const data = (await response.json()) as {
+    if (response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+      return await readStreamingTurn(response, input, deadline);
+    }
+    const data = (await Promise.race([response.json(), deadline])) as {
       choices?: Array<{
         message?: {
           content?: string | null;
@@ -360,15 +618,16 @@ async function attemptChatWithTools(input: GenerateWithToolsInput): Promise<Agen
     };
     const message = data.choices?.[0]?.message;
     if (!message) throw new ProviderError("PROVIDER_SERVER_ERROR", "模型服务未返回结果。");
+    if (message.reasoning_content) input.onReasoningDelta?.(message.reasoning_content);
     return {
       content: message.content ?? null,
       reasoningContent: message.reasoning_content ?? null,
       toolCalls: parseProviderToolCalls(message.tool_calls),
     };
   } catch (error) {
-    throw mapAbortError(error, input.signal);
+    throw mapAbortError(error, input.signal, timeoutMs);
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     input.signal?.removeEventListener("abort", onOuterAbort);
   }
 }
@@ -378,7 +637,8 @@ function isRetryableProviderError(error: unknown): boolean {
   return (
     error.code === "PROVIDER_NETWORK_ERROR" ||
     error.code === "PROVIDER_RATE_LIMIT" ||
-    error.code === "PROVIDER_SERVER_ERROR"
+    error.code === "PROVIDER_SERVER_ERROR" ||
+    error.code === "PROVIDER_TIMEOUT"
   );
 }
 
@@ -392,7 +652,8 @@ async function callChatWithTools(input: GenerateWithToolsInput): Promise<AgentTu
       // No retry: user aborts, auth/bad-request/protocol errors, and non-provider errors.
       if (input.signal?.aborted) throw error;
       if (!isRetryableProviderError(error)) throw error;
-      if (attempt === MAX_RETRIES) throw error;
+      const retryLimit = error instanceof ProviderError && error.code === "PROVIDER_TIMEOUT" ? 1 : MAX_RETRIES;
+      if (attempt >= retryLimit) throw error;
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
     }
   }
@@ -407,4 +668,5 @@ export const openaiProvider: AIProvider = {
     }
     return callChatWithTools(input);
   },
+  summarizeProgress: requestProgressSummary,
 };

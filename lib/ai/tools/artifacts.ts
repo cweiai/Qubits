@@ -8,8 +8,8 @@ import {
 } from "./schemas";
 
 /**
- * Artifact tools. FINAL deliverables (product_brief / research_report / app_blueprint /
- * code_workspace / build_report / test_report / review_report / preview_bundle /
+ * Artifact tools. FINAL deliverables (product_brief / code_workspace / build_report /
+ * test_report / security_report / preview_bundle /
  * data_report) are NEVER saved through create_artifact — the orchestrator persists
  * them exactly once after the child agent's finalSchema-validated structured output.
  * create_artifact exists only for intermediate "file" attachments and is Mike-only.
@@ -18,7 +18,7 @@ import {
 export const createArtifactTool: ServerToolDefinition<z.infer<typeof createArtifactArgsSchema>, z.infer<typeof createArtifactResultSchema>> = {
   name: "create_artifact",
   description:
-    "仅用于保存中间附件（kind 只能是 file，内容为纯文本）。最终交付物（product_brief/app_blueprint/code_workspace/review_report 等）由系统在子 Agent 输出通过校验后自动保存，严禁用本工具保存它们。",
+    "仅用于保存中间附件（kind 只能是 file，内容为纯文本）。最终交付物（product_brief/code_workspace 等）由系统在子 Agent 输出通过校验后自动保存，严禁用本工具保存它们。",
   argsSchema: createArtifactArgsSchema,
   resultSchema: createArtifactResultSchema,
   allowedRoles: ["team_leader"],

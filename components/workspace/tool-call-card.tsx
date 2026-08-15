@@ -242,7 +242,6 @@ const TOOL_ICONS: Record<string, typeof Wrench> = {
   create_record: Database,
   update_record: Database,
   delete_record: Database,
-  seed_demo_data: Database,
 };
 
 /** Friendly labels for Controller-level tool error codes (no-progress semantics). */
@@ -292,6 +291,4 @@ const TOOL_LABELS: Record<string, string> = {
   create_record: "创建记录",
   update_record: "更新记录",
   delete_record: "删除记录",
-  seed_demo_data: "写入演示数据",
-  request_user_approval: "申请审批",
 };

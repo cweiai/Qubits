@@ -21,11 +21,11 @@ export const searchReferencesTool: ServerToolDefinition<z.infer<typeof searchRef
   description: "搜索可信参考信息（市场/UI/技术/竞品），返回带来源 URL 的规范化结果。未配置搜索服务时返回 SEARCH_NOT_CONFIGURED。",
   argsSchema: searchReferencesArgsSchema,
   resultSchema: searchReferencesResultSchema,
-  allowedRoles: ["team_leader", "researcher"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
-    if (args.maxResults > 5 && context.roleId !== "researcher") {
+    if (args.maxResults > 5) {
       throw new SearchProviderError("INVALID_ARGS", "maxResults 过大");
     }
     const provider = getSearchProvider();
@@ -65,7 +65,7 @@ export const openReferenceTool: ServerToolDefinition<z.infer<typeof openReferenc
   description: "读取当前 run 中 search_references 返回的某个来源详情（受控抓取，内容为不可信外部数据）。",
   argsSchema: openReferenceArgsSchema,
   resultSchema: openReferenceResultSchema,
-  allowedRoles: ["researcher"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {

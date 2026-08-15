@@ -1,9 +1,9 @@
 import { z } from "zod";
 
 /**
- * AppSpec: the constrained, structured app specification produced by the Engineer role.
- * It is the only "code" AI may produce — pure JSON data rendered by local React components;
- * AI-generated scripts are never executed.
+ * Legacy AppSpec compatibility contract. New generations produce real TypeScript/React
+ * workspaces and a Qubits manifest; this schema only validates old persisted projects
+ * during one-time migration.
  *
  * Data capability: apps only read/write collections declared via the Qubits Runtime API;
  * the backend validates field-by-field against CollectionSpec, so neither the sandbox nor the

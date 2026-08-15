@@ -2,14 +2,28 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import type { AgentTurnResponse, AIProvider, ChatMessage, ToolCall, ToolChoiceSpec, ToolSpec } from "./provider";
+import type {
+  AgentTurnResponse,
+  AIProvider,
+  ChatMessage,
+  ToolCall,
+  ToolChoiceSpec,
+  ToolSpec,
+} from "./provider";
 import { getProvider } from "./provider";
-import type { RoleId } from "@/lib/contracts/agent-events";
-import { getToolDefinition, getToolDefinitionsForRole, getToolEffect, executeTool, ToolExecutionError } from "./tools/registry";
-import { createApproval, isApproved } from "./tools/approval";
+import type { ProgressPhase, RoleId } from "@/lib/contracts/agent-events";
+import {
+  getToolDefinition,
+  getToolDefinitionsForRole,
+  getToolEffect,
+  executeTool,
+  ToolExecutionError,
+} from "./tools/registry";
+import { createApproval, isApproved, waitForApproval } from "./tools/approval";
 import type { ToolExecutionContext } from "./tools/types";
 import { isToolError } from "./tools/references";
 import { isAbortLike } from "@/lib/workspace/errors";
+import { sanitizeProgressSummary } from "./progress-summary";
 
 /**
  * Centralized tool-calling agent loop.
@@ -36,43 +50,64 @@ interface RoleBudget {
   deadlineMs: number;
 }
 
-/** Per-role convergence budgets: the architect is a pure designer and must converge fast. */
+/** Per-role convergence budgets keep routing concise while giving code generation room. */
 const ROLE_BUDGETS: Record<RoleId, RoleBudget> = {
-  team_leader: { maxRounds: 40, maxToolCalls: 60, deadlineMs: 900_000 },
-  product_manager: { maxRounds: 8, maxToolCalls: 10, deadlineMs: 240_000 },
-  researcher: { maxRounds: 12, maxToolCalls: 20, deadlineMs: 300_000 },
-  architect: { maxRounds: 12, maxToolCalls: 12, deadlineMs: 240_000 },
-  engineer: { maxRounds: 60, maxToolCalls: 120, deadlineMs: 1_200_000 },
-  data_scientist: { maxRounds: 10, maxToolCalls: 15, deadlineMs: 240_000 },
-  reviewer: { maxRounds: 15, maxToolCalls:30, deadlineMs: 600_000 },
-  security_reviewer: { maxRounds: 10, maxToolCalls: 20, deadlineMs: 300_000 },
+  team_leader: { maxRounds: 80, maxToolCalls: 160, deadlineMs: 1_800_000 },
+  product_manager: { maxRounds: 16, maxToolCalls: 30, deadlineMs: 300_000 },
+  engineer: { maxRounds: 160, maxToolCalls: 320, deadlineMs: 1_800_000 },
 };
 
 function roleBudget(roleId: RoleId): RoleBudget {
   const budget = ROLE_BUDGETS[roleId] ?? ROLE_BUDGETS.team_leader;
   let next = { ...budget };
-  const deadlineOverride = Number.parseInt(process.env.QUIBITS_AGENT_DEADLINE_MS ?? "", 10);
-  if (Number.isFinite(deadlineOverride) && deadlineOverride > 0) next = { ...next, deadlineMs: deadlineOverride };
-  const maxRounds = Number.parseInt(process.env.QUIBITS_AGENT_MAX_ROUNDS ?? "", 10);
-  if (Number.isFinite(maxRounds) && maxRounds >= 1) next = { ...next, maxRounds };
-  const maxToolCalls = Number.parseInt(process.env.QUIBITS_AGENT_MAX_TOOL_CALLS ?? "", 10);
-  if (Number.isFinite(maxToolCalls) && maxToolCalls >= 1) next = { ...next, maxToolCalls };
+  const deadlineOverride = Number.parseInt(
+    process.env.QUIBITS_AGENT_DEADLINE_MS ?? "",
+    10,
+  );
+  if (Number.isFinite(deadlineOverride) && deadlineOverride > 0)
+    next = { ...next, deadlineMs: deadlineOverride };
+  const maxRounds = Number.parseInt(
+    process.env.QUIBITS_AGENT_MAX_ROUNDS ?? "",
+    10,
+  );
+  if (Number.isFinite(maxRounds) && maxRounds >= 1)
+    next = { ...next, maxRounds };
+  const maxToolCalls = Number.parseInt(
+    process.env.QUIBITS_AGENT_MAX_TOOL_CALLS ?? "",
+    10,
+  );
+  if (Number.isFinite(maxToolCalls) && maxToolCalls >= 1)
+    next = { ...next, maxToolCalls };
   return next;
 }
 
 /** Total tool-failure cap (regardless of interleaved successes). */
 export function readMaxTotalToolFailures(): number {
-  const parsed = Number.parseInt(process.env.QUIBITS_MAX_TOOL_FAILURES_TOTAL ?? "8", 10);
+  const parsed = Number.parseInt(
+    process.env.QUIBITS_MAX_TOOL_FAILURES_TOTAL ?? "8",
+    10,
+  );
   return Number.isFinite(parsed) && parsed >= 1 ? parsed : 8;
 }
 
 /** Consecutive tool-failure threshold: QUIBITS_MAX_TOOL_FAILURES (default 3, min 1). */
 export function readMaxToolFailures(): number {
-  const parsed = Number.parseInt(process.env.QUIBITS_MAX_TOOL_FAILURES ?? "3", 10);
+  const parsed = Number.parseInt(
+    process.env.QUIBITS_MAX_TOOL_FAILURES ?? "3",
+    10,
+  );
   return Number.isFinite(parsed) && parsed >= 1 ? parsed : 3;
 }
 
 const TOOL_REQUIRED_CODE = "TOOL_CALL_REQUIRED";
+const PROGRESS_VALIDATION_TOOLS = new Set([
+  "run_lint",
+  "run_typecheck",
+  "run_tests",
+  "run_build",
+  "security_scan",
+]);
+const PROGRESS_SUMMARY_COOLDOWN_MS = 4_000;
 /** How many executions of the same observation digest are allowed before it becomes DUPLICATE_OBSERVATION. */
 const HISTORY_LIMIT = 32;
 
@@ -107,18 +142,23 @@ function canonicalKey(value: unknown): string {
 }
 
 function resultDigest(value: unknown): string {
-  return createHash("sha256").update(canonicalKey(normalizeResultForDigest(value))).digest("hex");
+  return createHash("sha256")
+    .update(canonicalKey(normalizeResultForDigest(value)))
+    .digest("hex");
 }
 
 /** Volatile metadata that must never make two identical observations look different. */
-const VOLATILE_RESULT_KEYS = /^(durationMs|duration|builtAt|createdAt|updatedAt|modifiedAt|startedAt|completedAt|elapsedMs|requestId|toolCallId|callId|streamId|sandboxId|pid|at)$/i;
+const VOLATILE_RESULT_KEYS =
+  /^(durationMs|duration|builtAt|createdAt|updatedAt|modifiedAt|startedAt|completedAt|elapsedMs|requestId|toolCallId|callId|streamId|sandboxId|pid|at)$/i;
 
 function normalizeResultForDigest(value: unknown): unknown {
   const strip = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(strip);
     if (node !== null && typeof node === "object") {
       const out: Record<string, unknown> = {};
-      for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      for (const [key, child] of Object.entries(
+        node as Record<string, unknown>,
+      )) {
         if (VOLATILE_RESULT_KEYS.test(key)) continue;
         out[key] = strip(child);
       }
@@ -134,7 +174,11 @@ function normalizeResultForDigest(value: unknown): unknown {
  * For inspect_current_app without an existing app, includeRecords/includeSchema have
  * no meaning, so all flag combinations represent one observation.
  */
-function semanticArgsFor(toolName: string, args: unknown, state: StateVersion): unknown {
+function semanticArgsFor(
+  toolName: string,
+  args: unknown,
+  state: StateVersion,
+): unknown {
   if (toolName === "inspect_current_app" && !state.appPresent) {
     return {};
   }
@@ -150,12 +194,19 @@ interface StateVersion {
 }
 
 /** State version: local revision (mutating successes) + the externally visible app state. */
-function stateVersionOf(context: ToolExecutionContext, revision: number): StateVersion {
+function stateVersionOf(
+  context: ToolExecutionContext,
+  revision: number,
+): StateVersion {
   const manifest = context.currentManifest;
   const appPresent = manifest != null;
   const appKey =
-    "app" + context.currentVersion +
-    "|" + (manifest ? manifest.name + ":" + manifest.collections.map((c) => c.name).join(",") : "none");
+    "app" +
+    context.currentVersion +
+    "|" +
+    (manifest
+      ? manifest.name + ":" + manifest.collections.map((c) => c.name).join(",")
+      : "none");
   return {
     appPresent,
     appKey,
@@ -178,13 +229,23 @@ interface ObservationRecord extends ObservationFingerprint {
 
 /** Same observation regardless of argument spelling: name + state + result digest. */
 function observationIdentity(record: ObservationFingerprint): string {
-  return record.name + "|" + record.stateKey + "|" + (record.ok ? "ok:" + record.resultDigest : "err:" + (record.errorCode ?? "TOOL_ERROR"));
+  return (
+    record.name +
+    "|" +
+    record.stateKey +
+    "|" +
+    (record.ok
+      ? "ok:" + record.resultDigest
+      : "err:" + (record.errorCode ?? "TOOL_ERROR"))
+  );
 }
 
 /** Detect an alternating loop among successful observation tools. */
 function detectNoProgress(history: ObservationRecord[]): boolean {
   const last = history
-    .filter((record) => record.ok && getToolEffect(record.name) === "observation")
+    .filter(
+      (record) => record.ok && getToolEffect(record.name) === "observation",
+    )
     .slice(-4);
   if (last.length < 4) return false;
   const [a, b, c, d] = last.map((record) => observationIdentity(record));
@@ -193,7 +254,9 @@ function detectNoProgress(history: ObservationRecord[]): boolean {
 
 function isAlternatingPrefix(history: ObservationRecord[]): boolean {
   const last = history
-    .filter((record) => record.ok && getToolEffect(record.name) === "observation")
+    .filter(
+      (record) => record.ok && getToolEffect(record.name) === "observation",
+    )
     .slice(-3);
   if (last.length < 3) return false;
   const [a, b, c] = last.map((record) => observationIdentity(record));
@@ -205,19 +268,84 @@ type ControllerDirective =
   | { kind: "force_final" }
   | { kind: "force_next_tool"; name: string };
 
+interface EngineeringValidationState {
+  lintPassed: boolean;
+  typecheckPassed: boolean;
+  testsPassed: boolean;
+  buildArtifactId: string | null;
+  securityStatus: "pass" | "blocked" | null;
+}
+
+function emptyEngineeringValidation(): EngineeringValidationState {
+  return {
+    lintPassed: false,
+    typecheckPassed: false,
+    testsPassed: false,
+    buildArtifactId: null,
+    securityStatus: null,
+  };
+}
+
+/** The newest build report must still be the exact successful report validated in this run. */
+function latestSuccessfulBuildArtifactId(
+  context: ToolExecutionContext,
+): string | null {
+  const reports = context.artifacts.list("build_report");
+  const latest = reports[reports.length - 1];
+  if (!latest) return null;
+  const value = context.artifacts.get(latest.id);
+  if (
+    !value ||
+    typeof value !== "object" ||
+    (value as { status?: unknown }).status !== "success"
+  )
+    return null;
+  return latest.id;
+}
+
+function nextEngineeringValidationTool(
+  state: EngineeringValidationState,
+): string | null {
+  if (!state.lintPassed) return "run_lint";
+  if (!state.typecheckPassed) return "run_typecheck";
+  if (!state.testsPassed) return "run_tests";
+  if (!state.buildArtifactId) return "run_build";
+  if (state.securityStatus !== "pass") return "security_scan";
+  return null;
+}
+
+/** These tools can change source files or dependencies after a successful build. */
+const WORKSPACE_MUTATION_TOOLS = new Set([
+  "bash",
+  "workspace_init",
+  "dependency_add",
+  "dependency_remove",
+  "restore_code_snapshot",
+  "restore_checkpoint",
+  "fs_write",
+  "fs_patch",
+  "fs_delete",
+  "fs_create_dir",
+  "fs_copy",
+  "fs_move",
+  "run_format",
+]);
+
 /** DUPLICATE_OBSERVATION policy per role. */
-function duplicateObservationPolicy(roleId: RoleId, toolName: string): ControllerDirective | "gate" {
+function duplicateObservationPolicy(
+  roleId: RoleId,
+  toolName: string,
+): ControllerDirective | "gate" {
   switch (roleId) {
     case "product_manager":
-    case "architect":
-    case "data_scientist":
-    case "researcher":
       return { kind: "force_final" };
     case "team_leader":
       // Repeatedly re-checking the current app: the next round MUST delegate.
-      return toolName === "inspect_current_app" ? { kind: "force_next_tool", name: "delegate_to_agent" } : "gate";
+      return toolName === "inspect_current_app"
+        ? { kind: "force_next_tool", name: "delegate_to_agent" }
+        : "gate";
     default:
-      // engineer / reviewer / security_reviewer: disable the proven-no-progress tool.
+      // Engineer disables the proven-no-progress tool and continues with another action.
       return "gate";
   }
 }
@@ -226,9 +354,6 @@ function duplicateObservationPolicy(roleId: RoleId, toolName: string): Controlle
 function noProgressPolicy(roleId: RoleId): ControllerDirective | "gate" {
   switch (roleId) {
     case "product_manager":
-    case "architect":
-    case "data_scientist":
-    case "researcher":
       return { kind: "force_final" };
     case "team_leader":
       return { kind: "force_next_tool", name: "delegate_to_agent" };
@@ -258,23 +383,33 @@ const NO_RETRY_CODES = new Set([
 
 /** Model-facing repair suggestions for fixable tool errors. */
 const REPAIR_HINTS: Record<string, string> = {
-  PATH_ESCAPE: "文件工具只接受工作区内的相对路径（禁止以 / 开头的绝对路径与 ../），可先用 fs_list 查看目录结构。",
+  PATH_ESCAPE:
+    "文件工具只接受工作区内的相对路径（禁止以 / 开头的绝对路径与 ../），可先用 fs_list 查看目录结构。",
   INVALID_PATH: "路径格式不合法，请改用工作区内的相对路径。",
   SENSITIVE_FILE: "目标属于敏感文件（如 .env、密钥），请改用普通业务文件。",
-  SYSTEM_OWNED_FILE: "目标属于系统维护文件（package.json/tsconfig/SDK bridge/构建配置），AI 不能修改，请改用可写文件。",
+  SYSTEM_OWNED_FILE:
+    "目标属于系统维护文件（package.json/tsconfig/SDK bridge/构建配置），AI 不能修改，请改用可写文件。",
   NOT_FOUND: "目标不存在，请先用 fs_list 确认路径与文件名后重试。",
-  PATCH_NO_MATCH: "oldText 未在文件中命中，请先用 fs_read 确认文件当前内容再重试。",
+  PATCH_NO_MATCH:
+    "oldText 未在文件中命中，请先用 fs_read 确认文件当前内容再重试。",
   INVALID_ARGS: "参数不符合该工具的 schema，请检查参数名、类型与必填字段。",
-  ARTIFACT_NOT_FOUND: "artifact 不存在，请先用 get_artifact 确认有效 id 后重试。",
-  COLLECTION_NOT_DECLARED: "集合未在 qubits.manifest.json 中声明，请修改 manifest 声明该集合并通过校验。",
+  ARTIFACT_NOT_FOUND:
+    "artifact 不存在，请先用 get_artifact 确认有效 id 后重试。",
+  COLLECTION_NOT_DECLARED:
+    "集合未在 qubits.manifest.json 中声明，请修改 manifest 声明该集合并通过校验。",
   WORKSPACE_NOT_INITIALIZED: "工作区尚未初始化，请先调用 workspace_init。",
-  INVALID_MANIFEST: "qubits.manifest.json 未通过校验，请按问题清单修正（构建入口 src/main.tsx 由系统固定）。",
-  INVALID_DEPENDENCY: "依赖必须来自服务端 allowlist 固定版本（用 dependency_list 查看），禁止任意包名/URL/Git 依赖。",
-  BUILD_FAILED: "构建失败，请用 get_build_errors 查看真实错误并修复后重新 run_build，不要虚构成功。",
+  INVALID_MANIFEST:
+    "qubits.manifest.json 未通过校验，请按问题清单修正（构建入口 src/main.tsx 由系统固定）。",
+  INVALID_DEPENDENCY:
+    "依赖必须来自服务端 allowlist 固定版本（用 dependency_list 查看），禁止任意包名/URL/Git 依赖。",
+  BUILD_FAILED:
+    "构建失败，请用 get_build_errors 查看真实错误并修复后重新 run_build，不要虚构成功。",
   TYPECHECK_FAILED: "类型检查失败，请按 tsc 报错修复后重新 run_typecheck。",
   TEST_FAILED: "测试失败，请修复断言或实现后重新 run_tests。",
-  REPEATED_FAILED_CALL: "该调用与之前失败的调用完全相同：请修复参数后重试，或改用其他工具完成目标；不要原样重复。",
-  APPROVAL_REQUIRED: "该操作需要用户审批，请等待审批通过后重试，不要反复触发审批。",
+  REPEATED_FAILED_CALL:
+    "该调用与之前失败的调用完全相同：请修复参数后重试，或改用其他工具完成目标；不要原样重复。",
+  APPROVAL_REQUIRED:
+    "该操作需要用户审批，请等待审批通过后重试，不要反复触发审批。",
 };
 
 /** Don't fabricate suggestions for unknown error codes; the model still receives the raw error message. */
@@ -286,7 +421,8 @@ function repairHint(code?: string): string {
 
 /** Extract tool args for the correction message (redacted + truncated) so the model sees what it last passed. */
 function summarizeArgsForCorrection(rawArguments: string): string {
-  const SECRET_KEYS = /(apiKey|api_key|apikey|secret|password|token|authorization)/i;
+  const SECRET_KEYS =
+    /(apiKey|api_key|apikey|secret|password|token|authorization)/i;
   try {
     const parsed = JSON.parse(rawArguments || "{}");
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -312,9 +448,15 @@ function summarizeArgsForCorrection(rawArguments: string): string {
 }
 
 /** Normalize arg keys to a canonical semantic key (order-independent, meaningless dims dropped). */
-function semanticArgsKeyFor(toolName: string, rawArguments: string, state: StateVersion): string {
+function semanticArgsKeyFor(
+  toolName: string,
+  rawArguments: string,
+  state: StateVersion,
+): string {
   try {
-    return canonicalKey(semanticArgsFor(toolName, JSON.parse(rawArguments || "{}"), state));
+    return canonicalKey(
+      semanticArgsFor(toolName, JSON.parse(rawArguments || "{}"), state),
+    );
   } catch {
     return rawArguments || "{}";
   }
@@ -333,18 +475,31 @@ export function normalizeTurnToolCalls(toolCalls: ToolCall[]): ToolCall[] {
   const seen = new Set<string>();
   return toolCalls.map((call, index) => {
     const name = call.name.trim();
-    if (!name) throw new ToolLoopError("INVALID_TOOL_CALL", `模型返回的第 ${index + 1} 个工具调用缺少名称`);
+    if (!name)
+      throw new ToolLoopError(
+        "INVALID_TOOL_CALL",
+        `模型返回的第 ${index + 1} 个工具调用缺少名称`,
+      );
     const id = call.id.trim() || "tc-" + crypto.randomUUID();
     if (seen.has(id)) {
-      throw new ToolLoopError("INVALID_TOOL_CALL", `模型返回了重复的 tool call id：${id}`);
+      throw new ToolLoopError(
+        "INVALID_TOOL_CALL",
+        `模型返回了重复的 tool call id：${id}`,
+      );
     }
     seen.add(id);
     return { ...call, id, name };
   });
 }
 
-function extractJsonObject(text: string): { ok: true; value: unknown } | { ok: false; error: string } {
-  const trimmed = text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+function extractJsonObject(
+  text: string,
+): { ok: true; value: unknown } | { ok: false; error: string } {
+  const trimmed = text
+    .trim()
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/, "")
+    .trim();
   try {
     return { ok: true, value: JSON.parse(trimmed) };
   } catch {
@@ -367,32 +522,70 @@ function toolSpecsFor(roleId: RoleId, exclude: Set<string>): ToolSpec[] {
     .map((definition) => ({
       name: definition.name,
       description: definition.description,
-      parameters: zodToJsonSchema(definition.argsSchema, { $refStrategy: "none", name: undefined }) as Record<string, unknown>,
+      parameters: zodToJsonSchema(definition.argsSchema, {
+        $refStrategy: "none",
+        name: undefined,
+      }) as Record<string, unknown>,
     }));
 }
 
-export async function runToolCallingAgent(input: RunAgentInput): Promise<ValidatedAgentResult> {
+/** Give every provider the exact final contract instead of relying on prose field lists. */
+export function buildAgentSystemPrompt(
+  systemPrompt: string,
+  finalSchema: z.ZodType,
+): string {
+  const schema = zodToJsonSchema(finalSchema, {
+    $refStrategy: "none",
+    name: undefined,
+  });
+  return [
+    systemPrompt,
+    "FINAL OUTPUT JSON SCHEMA (authoritative):",
+    JSON.stringify(schema),
+    "When you finish, return exactly one JSON object matching this schema. Do not invent alternative field shapes or extra fields. Keep every string concise so the complete JSON fits in one response.",
+  ].join("\n\n");
+}
+
+export async function runToolCallingAgent(
+  input: RunAgentInput,
+): Promise<ValidatedAgentResult> {
   const provider = input.providerOverride ?? getProvider();
   const maxToolFailures = readMaxToolFailures();
   const maxTotalFailures = readMaxTotalToolFailures();
   const budget = roleBudget(input.roleId);
   const loopStartedAt = Date.now();
+  const systemPrompt = buildAgentSystemPrompt(
+    input.systemPrompt,
+    input.finalSchema,
+  );
   const messages: ChatMessage[] = [{ role: "user", content: input.taskPrompt }];
   let toolCallsMade = 0;
   let consecutiveFailures = 0;
   let totalFailures = 0;
+  const progressSummaryState: ProgressSummaryState = {
+    phase: null,
+    lastStartedAt: 0,
+    sequence: 0,
+    inFlight: null,
+  };
 
   // Controller state is scoped to one agent run.
   let revision = 0;
   let directive: ControllerDirective = { kind: "auto" };
   const history: ObservationRecord[] = [];
-  const observationCache = new Map<string, {
-    result: unknown;
-    artifactIds: string[];
-    summary: string;
-  }>();
+  const observationCache = new Map<
+    string,
+    {
+      result: unknown;
+      artifactIds: string[];
+      summary: string;
+    }
+  >();
   /** Tools gated for the current state version (proven to yield no new information). */
   const gates = new Map<string, string>();
+  // Validation evidence belongs to this agent run and the current workspace revision.
+  let engineeringValidation = emptyEngineeringValidation();
+  let engineeringValidationActive = false;
 
   const respondTool = (callId: string, content: string): ChatMessage => ({
     role: "tool",
@@ -402,14 +595,17 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
 
   const pushHistory = (record: ObservationRecord): void => {
     history.push(record);
-    if (history.length > HISTORY_LIMIT) history.splice(0, history.length - HISTORY_LIMIT);
+    if (history.length > HISTORY_LIMIT)
+      history.splice(0, history.length - HISTORY_LIMIT);
   };
 
   for (let round = 0; round < budget.maxRounds; round++) {
     if (Date.now() - loopStartedAt > budget.deadlineMs) {
       throw new ToolLoopError(
         "AGENT_DEADLINE_EXCEEDED",
-        "该 Agent 已超出总执行时限（" + Math.round(budget.deadlineMs / 1000) + " 秒）。已停止执行，请基于已有信息直接给出最终输出。"
+        "该 Agent 已超出总执行时限（" +
+          Math.round(budget.deadlineMs / 1000) +
+          " 秒）。已停止执行，请基于已有信息直接给出最终输出。",
       );
     }
     const state = stateVersionOf(input.context, revision);
@@ -419,31 +615,65 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
     }
     // Expose no tools for force_final and one tool for force_next_tool.
     let exposedNames: Set<string> | null = null;
-    if (directive.kind === "force_next_tool") exposedNames = new Set([directive.name]);
+    if (directive.kind === "force_next_tool")
+      exposedNames = new Set([directive.name]);
     else if (directive.kind === "force_final") exposedNames = new Set();
-    const tools = toolSpecsFor(input.roleId, gatedNames).filter((spec) => exposedNames === null || exposedNames.has(spec.name));
+    const tools = toolSpecsFor(input.roleId, gatedNames).filter(
+      (spec) => exposedNames === null || exposedNames.has(spec.name),
+    );
     const toolChoice: ToolChoiceSpec =
-      directive.kind === "auto" ? { mode: "auto" } :
-      directive.kind === "force_final" ? { mode: "none" } :
-      { mode: "function", name: directive.name };
+      directive.kind === "auto"
+        ? { mode: "auto" }
+        : directive.kind === "force_final"
+          ? { mode: "none" }
+          : { mode: "function", name: directive.name };
 
     let turn: AgentTurnResponse;
+    let streamedReasoning = "";
+    let streamedReasoningLength = 0;
+    let nextStreamingSummaryAt = 256;
     try {
       turn = await provider.generateWithTools({
-        system: input.systemPrompt,
+        system: systemPrompt,
         messages,
         tools,
         roleId: input.roleId,
         signal: input.signal,
         toolChoice,
+        onReasoningDelta: (delta) => {
+          streamedReasoningLength += delta.length;
+          streamedReasoning = (streamedReasoning + delta).slice(-12_000);
+          if (streamedReasoningLength < nextStreamingSummaryAt) return;
+          const started = scheduleProgressSummary(
+            input,
+            provider,
+            streamedReasoning,
+            progressPhaseForTurn(input.roleId, []),
+            progressSummaryState,
+          );
+          if (started) nextStreamingSummaryAt = streamedReasoningLength + 2_000;
+        },
       });
     } catch (error) {
       const code = (error as { code?: unknown })?.code;
       if (typeof code === "string" && code.length > 0) {
-        throw new ToolLoopError(code, error instanceof Error ? error.message.slice(0, 300) : "模型服务错误");
+        throw new ToolLoopError(
+          code,
+          error instanceof Error ? error.message.slice(0, 300) : "模型服务错误",
+        );
       }
       throw error;
     }
+
+    // DeepSeek-style providers may spend a long time in reasoning_content. Summarize it
+    // through a separate short request while the primary loop continues with tool work.
+    scheduleProgressSummary(
+      input,
+      provider,
+      turn.reasoningContent ?? streamedReasoning,
+      progressPhaseForTurn(input.roleId, turn.toolCalls),
+      progressSummaryState,
+    );
 
     if (turn.toolCalls.length > 0) {
       const calls = normalizeTurnToolCalls(turn.toolCalls);
@@ -459,14 +689,26 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
       const duplicateTools = new Set<string>();
       const noProgressTools = new Set<string>();
       let sawGatedCall = false;
+      let successfulBuildInBatch = false;
+      let engineeringValidationFailedInBatch = false;
+      let approvalBlockedInBatch = false;
       // Successful forced actions return the controller to normal routing.
       const batchSucceeded = new Set<string>();
-      for (const call of calls) {
+      for (let callIndex = 0; callIndex < calls.length; callIndex++) {
+        const call = calls[callIndex];
         input.context.counters.toolCalls += 1;
         toolCallsMade += 1;
         if (toolCallsMade > budget.maxToolCalls) {
-          const message = "该 Agent 的工具调用次数超出预算（" + budget.maxToolCalls + "）。已停止执行，请基于已有信息直接给出最终输出。";
-          input.context.emit({ type: "error", roleId: input.roleId, message, code: "AGENT_TOOL_BUDGET_EXCEEDED" });
+          const message =
+            "该 Agent 的工具调用次数超出预算（" +
+            budget.maxToolCalls +
+            "）。已停止执行，请基于已有信息直接给出最终输出。";
+          input.context.emit({
+            type: "error",
+            roleId: input.roleId,
+            message,
+            code: "AGENT_TOOL_BUDGET_EXCEEDED",
+          });
           throw new ToolLoopError("AGENT_TOOL_BUDGET_EXCEEDED", message);
         }
         const toolCallId = call.id;
@@ -478,12 +720,24 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
           toolName: call.name.slice(0, 60),
           inputSummary: summarizeArgs(call),
         });
-        const semanticKey = semanticArgsKeyFor(call.name, call.rawArguments, state);
+        const semanticKey = semanticArgsKeyFor(
+          call.name,
+          call.rawArguments,
+          state,
+        );
         const effect = getToolEffect(call.name);
-        const cacheStateKey = call.name === "inspect_current_app" ? state.appKey : state.key;
+        const cacheStateKey =
+          call.name === "inspect_current_app" ? state.appKey : state.key;
         const cacheKey = call.name + "|" + cacheStateKey + "|" + semanticKey;
         const startedAt = Date.now();
-        let outcome: { ok: boolean; result: unknown; summary: string; errorCode?: string; artifactIds: string[]; durationMs: number };
+        let outcome: {
+          ok: boolean;
+          result: unknown;
+          summary: string;
+          errorCode?: string;
+          artifactIds: string[];
+          durationMs: number;
+        };
 
         // A gated observation already proved it cannot add information for this state.
         if (gates.get(call.name) === state.key) {
@@ -491,20 +745,25 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
           outcome = {
             ok: false,
             result: null,
-            summary: "该工具在当前应用状态下已被禁用（此前调用没有产生新信息）。请执行下一步或输出最终结果。",
+            summary:
+              "该工具在当前应用状态下已被禁用（此前调用没有产生新信息）。请执行下一步或输出最终结果。",
             errorCode: "CONTROLLER_DIRECTIVE",
             artifactIds: [],
             durationMs: 0,
           };
         }
         // Provider output is still validated if a compatible backend ignores tool choice.
-        else if (directive.kind === "force_final" || (directive.kind === "force_next_tool" && directive.name !== call.name)) {
+        else if (
+          directive.kind === "force_final" ||
+          (directive.kind === "force_next_tool" && directive.name !== call.name)
+        ) {
           outcome = {
             ok: false,
             result: null,
-            summary: directive.kind === "force_final"
-              ? "Controller 已禁用全部工具：请立即输出最终结构化 JSON，不要调用工具。"
-              : "Controller 当前只允许调用 " + directive.name + "。",
+            summary:
+              directive.kind === "force_final"
+                ? "Controller 已禁用全部工具：请立即输出最终结构化 JSON，不要调用工具。"
+                : "Controller 当前只允许调用 " + directive.name + "。",
             errorCode: "CONTROLLER_DIRECTIVE",
             artifactIds: [],
             durationMs: 0,
@@ -521,7 +780,15 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
             durationMs: 0,
           };
         } else {
-          outcome = await executeCall(call, input, toolCallId, startedAt, state.key, semanticKey, history);
+          outcome = await executeCall(
+            call,
+            input,
+            toolCallId,
+            startedAt,
+            state.key,
+            semanticKey,
+            history,
+          );
         }
 
         if (outcome.ok && effect === "observation") {
@@ -535,7 +802,9 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
             errorCode: null,
           };
           const sameResult = history.some(
-            (record) => record.ok && observationIdentity(record) === observationIdentity(fingerprint)
+            (record) =>
+              record.ok &&
+              observationIdentity(record) === observationIdentity(fingerprint),
           );
           observationCache.set(cacheKey, {
             result: outcome.result,
@@ -544,13 +813,16 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
           });
           pushHistory({ ...fingerprint, at: Date.now() });
           if (detectNoProgress(history)) {
-            for (const record of history.filter((record) => record.ok).slice(-4)) {
+            for (const record of history
+              .filter((record) => record.ok)
+              .slice(-4)) {
               noProgressTools.add(record.name);
             }
             outcome = {
               ok: false,
               result: outcome.result,
-              summary: "检测到交替重复且没有状态推进的工具循环。相关观察工具将被禁用，请执行真正不同的下一步。",
+              summary:
+                "检测到交替重复且没有状态推进的工具循环。相关观察工具将被禁用，请执行真正不同的下一步。",
               errorCode: "NO_PROGRESS",
               artifactIds: outcome.artifactIds,
               durationMs: outcome.durationMs,
@@ -560,13 +832,18 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
             outcome = {
               ok: false,
               result: outcome.result,
-              summary: "本次调用返回了与当前状态下已有观察相同的信息。该工具不会继续产生新信息，请执行下一步。",
+              summary:
+                "本次调用返回了与当前状态下已有观察相同的信息。该工具不会继续产生新信息，请执行下一步。",
               errorCode: "DUPLICATE_OBSERVATION",
               artifactIds: outcome.artifactIds,
               durationMs: outcome.durationMs,
             };
           }
-        } else if (outcome.errorCode === "DUPLICATE_OBSERVATION" || outcome.errorCode === "NO_PROGRESS" || outcome.errorCode === "CONTROLLER_DIRECTIVE") {
+        } else if (
+          outcome.errorCode === "DUPLICATE_OBSERVATION" ||
+          outcome.errorCode === "NO_PROGRESS" ||
+          outcome.errorCode === "CONTROLLER_DIRECTIVE"
+        ) {
           // Controller responses are not observations and cannot establish progress.
         } else if (!outcome.ok) {
           pushHistory({
@@ -578,6 +855,86 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
             errorCode: outcome.errorCode ?? "TOOL_ERROR",
             at: Date.now(),
           });
+        }
+
+        if (input.roleId === "engineer") {
+          if (outcome.ok && WORKSPACE_MUTATION_TOOLS.has(call.name)) {
+            // Any possible source or dependency change makes all earlier evidence stale.
+            engineeringValidation = emptyEngineeringValidation();
+            engineeringValidationActive = false;
+          } else if (call.name === "run_lint") {
+            const result = outcome.result as { status?: unknown } | null;
+            engineeringValidation.lintPassed =
+              outcome.ok && result?.status === "passed";
+            engineeringValidationFailedInBatch ||=
+              !engineeringValidation.lintPassed;
+          } else if (call.name === "run_typecheck") {
+            const result = outcome.result as { status?: unknown } | null;
+            engineeringValidation.typecheckPassed =
+              outcome.ok && result?.status === "passed";
+            engineeringValidationFailedInBatch ||=
+              !engineeringValidation.typecheckPassed;
+          } else if (call.name === "run_tests") {
+            const result = outcome.result as { status?: unknown } | null;
+            engineeringValidation.testsPassed =
+              outcome.ok && result?.status === "passed";
+            engineeringValidationFailedInBatch ||=
+              !engineeringValidation.testsPassed;
+          } else if (call.name === "run_build") {
+            const buildResult = outcome.result as {
+              status?: unknown;
+              buildArtifactId?: unknown;
+            } | null;
+            const artifactId =
+              typeof buildResult?.buildArtifactId === "string"
+                ? buildResult.buildArtifactId
+                : null;
+            const ref = artifactId
+              ? input.context.artifacts.getRef(artifactId)
+              : null;
+            const report = artifactId
+              ? input.context.artifacts.get(artifactId)
+              : null;
+            const isSuccess =
+              buildResult?.status === "success" &&
+              ref?.kind === "build_report" &&
+              report !== null &&
+              typeof report === "object" &&
+              (report as { status?: unknown }).status === "success";
+            if (isSuccess && artifactId) {
+              engineeringValidation.buildArtifactId = artifactId;
+              engineeringValidation.securityStatus = null;
+              engineeringValidationActive = true;
+              successfulBuildInBatch = true;
+            } else {
+              engineeringValidation.buildArtifactId = null;
+              engineeringValidation.securityStatus = null;
+              engineeringValidationActive = false;
+              engineeringValidationFailedInBatch = true;
+            }
+          } else if (call.name === "security_scan") {
+            const scanResult = outcome.result as { status?: unknown } | null;
+            const buildIsCurrent =
+              engineeringValidation.buildArtifactId !== null &&
+              latestSuccessfulBuildArtifactId(input.context) ===
+                engineeringValidation.buildArtifactId;
+            if (
+              outcome.ok &&
+              buildIsCurrent &&
+              (scanResult?.status === "pass" ||
+                scanResult?.status === "blocked")
+            ) {
+              engineeringValidation.securityStatus = scanResult.status;
+              if (scanResult.status === "blocked") {
+                engineeringValidationActive = false;
+                engineeringValidationFailedInBatch = true;
+              }
+            } else {
+              engineeringValidation.securityStatus = null;
+              engineeringValidationActive = false;
+              engineeringValidationFailedInBatch = true;
+            }
+          }
         }
 
         input.context.emit({
@@ -599,15 +956,33 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
         let toolPayload: string;
         if (outcome.ok) {
           toolPayload = JSON.stringify(outcome.result) ?? "null";
-        } else if ((outcome.errorCode === "DUPLICATE_OBSERVATION" || outcome.errorCode === "NO_PROGRESS") && outcome.result != null) {
-          toolPayload = JSON.stringify({ error: { code: outcome.errorCode, message: outcome.summary }, observation: outcome.result }) ?? "null";
+        } else if (
+          (outcome.errorCode === "DUPLICATE_OBSERVATION" ||
+            outcome.errorCode === "NO_PROGRESS") &&
+          outcome.result != null
+        ) {
+          toolPayload =
+            JSON.stringify({
+              error: { code: outcome.errorCode, message: outcome.summary },
+              observation: outcome.result,
+            }) ?? "null";
         } else {
-          toolPayload = JSON.stringify({ error: { code: outcome.errorCode, message: outcome.summary, ...(errorHint ? { hint: errorHint } : {}) } }) ?? "null";
+          toolPayload =
+            JSON.stringify({
+              error: {
+                code: outcome.errorCode,
+                message: outcome.summary,
+                ...(errorHint ? { hint: errorHint } : {}),
+              },
+            }) ?? "null";
         }
         toolResults.push(respondTool(toolCallId, toolPayload));
 
         if (!outcome.ok) {
           const code = outcome.errorCode ?? "TOOL_ERROR";
+          if (code === "APPROVAL_DENIED" || code === "APPROVAL_EXPIRED") {
+            approvalBlockedInBatch = true;
+          }
           if (NO_RETRY_CODES.has(code)) {
             // Not an ordinary failure: no retry advice, no failure counting.
             continue;
@@ -615,15 +990,36 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
           consecutiveFailures += 1;
           totalFailures += 1;
           failureInstructions.push(
-            "工具调用失败：" + call.name + "（错误码 " + code + "）：" + outcome.summary +
-            "。你传入的参数：" + summarizeArgsForCorrection(call.rawArguments) +
-            (errorHint ? "。修复建议：" + errorHint : "") +
-            "。请修改参数、换一种方式完成目标，或改用其他可用工具后重试。"
+            "工具调用失败：" +
+              call.name +
+              "（错误码 " +
+              code +
+              "）：" +
+              outcome.summary +
+              "。你传入的参数：" +
+              summarizeArgsForCorrection(call.rawArguments) +
+              (errorHint ? "。修复建议：" + errorHint : "") +
+              "。请修改参数、换一种方式完成目标，或改用其他可用工具后重试。",
           );
-          if (consecutiveFailures > maxToolFailures || totalFailures > maxTotalFailures) {
+          if (
+            consecutiveFailures > maxToolFailures ||
+            totalFailures > maxTotalFailures
+          ) {
             const message =
-              "工具调用连续失败 " + consecutiveFailures + " 次（累计 " + totalFailures + " 次，上限 " + maxTotalFailures + "），已停止执行。最后错误：" + outcome.summary;
-            input.context.emit({ type: "error", roleId: input.roleId, message, code: "TOOL_FAILURE_LIMIT_EXCEEDED" });
+              "工具调用连续失败 " +
+              consecutiveFailures +
+              " 次（累计 " +
+              totalFailures +
+              " 次，上限 " +
+              maxTotalFailures +
+              "），已停止执行。最后错误：" +
+              outcome.summary;
+            input.context.emit({
+              type: "error",
+              roleId: input.roleId,
+              message,
+              code: "TOOL_FAILURE_LIMIT_EXCEEDED",
+            });
             throw new ToolLoopError("TOOL_FAILURE_LIMIT_EXCEEDED", message);
           }
         } else {
@@ -638,24 +1034,37 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
 
       // Controller update based on this batch's signals.
       let controllerInstruction = "";
+      if (approvalBlockedInBatch) {
+        directive = { kind: "force_final" };
+        controllerInstruction = "用户未批准该高风险操作。请停止调用该工具，基于已有结果输出最终 JSON；不要再次申请同一操作。";
+      }
       // A successful forced tool restores normal routing.
-      if (directive.kind === "force_next_tool" && batchSucceeded.has(directive.name)) {
+      if (!approvalBlockedInBatch &&
+        directive.kind === "force_next_tool" &&
+        batchSucceeded.has(directive.name)
+      ) {
         directive = { kind: "auto" };
       }
       if (noProgressTools.size > 0 && directive.kind === "auto") {
         const policy = noProgressPolicy(input.roleId);
         if (policy === "gate") {
           for (const name of noProgressTools) gates.set(name, state.key);
-          controllerInstruction = "检测到无进展循环（NO_PROGRESS）：相关观察工具已禁用。请执行真正不同的操作或输出最终结果。";
+          controllerInstruction =
+            "检测到无进展循环（NO_PROGRESS）：相关观察工具已禁用。请执行真正不同的操作或输出最终结果。";
         } else {
           directive = policy;
         }
       } else if (duplicateTools.size > 0 && directive.kind === "auto") {
-        const duplicateTool = [...calls].reverse().find((call) => duplicateTools.has(call.name))?.name ?? [...duplicateTools][0];
+        const duplicateTool =
+          [...calls].reverse().find((call) => duplicateTools.has(call.name))
+            ?.name ?? [...duplicateTools][0];
         const policy = duplicateObservationPolicy(input.roleId, duplicateTool);
         if (policy === "gate") {
           gates.set(duplicateTool, state.key);
-          controllerInstruction = "工具 " + duplicateTool + " 已禁用（重复观察不会产生新信息）。请改用其他工具继续，或直接输出最终结果。";
+          controllerInstruction =
+            "工具 " +
+            duplicateTool +
+            " 已禁用（重复观察不会产生新信息）。请改用其他工具继续，或直接输出最终结果。";
         } else {
           directive = policy;
         }
@@ -663,14 +1072,60 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
         // The model called an already-gated tool: escalate to force_final.
         directive = { kind: "force_final" };
       }
+      if (input.roleId === "engineer") {
+        const latestBuildArtifactId = latestSuccessfulBuildArtifactId(
+          input.context,
+        );
+        if (
+          engineeringValidation.buildArtifactId &&
+          latestBuildArtifactId !== engineeringValidation.buildArtifactId
+        ) {
+          engineeringValidation.buildArtifactId = null;
+          engineeringValidation.securityStatus = null;
+          engineeringValidationActive = false;
+        }
+        if (engineeringValidationFailedInBatch) {
+          // A failed forced check must release the gate so Alex can edit the workspace.
+          directive = { kind: "auto" };
+          engineeringValidationActive = false;
+          controllerInstruction =
+            "Controller 检测到工程验证未通过：请根据真实错误修改代码，再从缺失的验证步骤继续。";
+        } else if (engineeringValidationActive || successfulBuildInBatch) {
+          const nextTool = nextEngineeringValidationTool(engineeringValidation);
+          if (nextTool) {
+            directive = { kind: "force_next_tool", name: nextTool };
+            controllerInstruction =
+              "Controller 正在验证同一份最新工作区：下一步必须调用 " +
+              nextTool +
+              "。";
+          } else {
+            directive = { kind: "force_final" };
+            controllerInstruction =
+              "Controller 已确认最新工作区的 lint、类型检查、测试、构建和安全扫描全部通过：请立即输出最终 code_workspace JSON，不要继续调用工具。";
+          }
+        }
+      }
       if (directive.kind === "force_final" && controllerInstruction === "") {
-        controllerInstruction = "Controller 指令：请立即依据已有信息输出最终 JSON（符合给定 schema），不要调用任何工具。";
-      } else if (directive.kind === "force_next_tool" && controllerInstruction === "") {
-        controllerInstruction = "Controller 指令：下一步必须调用 " + directive.name + "，然后根据其结果继续。";
+        controllerInstruction =
+          "Controller 指令：请立即依据已有信息输出最终 JSON（符合给定 schema），不要调用任何工具。";
+      } else if (
+        directive.kind === "force_next_tool" &&
+        controllerInstruction === ""
+      ) {
+        controllerInstruction =
+          "Controller 指令：下一步必须调用 " +
+          directive.name +
+          "，然后根据其结果继续。";
       }
       if (failureInstructions.length > 0) {
-        messages.push({ role: "user", content: failureInstructions.join("\n") + "\n请针对以上每一条失败分别修正后继续，不要原样重复任何一次失败的调用。" });
-      } else if (controllerInstruction !== "") {
+        messages.push({
+          role: "user",
+          content:
+            failureInstructions.join("\n") +
+            "\n请针对以上每一条失败分别修正后继续，不要原样重复任何一次失败的调用。",
+        });
+      }
+      if (controllerInstruction !== "") {
         messages.push({ role: "user", content: controllerInstruction });
       }
       continue;
@@ -683,27 +1138,101 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
       const parsed = input.finalSchema.safeParse(extracted.value);
       if (parsed.success) {
         if (input.requireToolCall && toolCallsMade === 0) {
-          throw new ToolLoopError(TOOL_REQUIRED_CODE, "该阶段必须通过真实工具调用完成，模型未发起任何工具调用");
+          throw new ToolLoopError(
+            TOOL_REQUIRED_CODE,
+            "该阶段必须通过真实工具调用完成，模型未发起任何工具调用",
+          );
         }
-        const summary = typeof (parsed.data as { summary?: unknown }).summary === "string"
-          ? ((parsed.data as { summary: string }).summary.slice(0, 300))
-          : "已完成";
-        return { status: "completed", summary, artifact: parsed.data, issues: [], toolCallsMade };
+        const finalValue = parsed.data as Record<string, unknown>;
+        const isCodeWorkspace =
+          input.roleId === "engineer" &&
+          Object.prototype.hasOwnProperty.call(finalValue, "buildStatus") &&
+          Object.prototype.hasOwnProperty.call(finalValue, "buildArtifactId");
+        if (isCodeWorkspace) {
+          const latestBuildArtifactId = latestSuccessfulBuildArtifactId(
+            input.context,
+          );
+          if (engineeringValidation.securityStatus === "blocked") {
+            directive = { kind: "auto" };
+            engineeringValidationActive = false;
+            messages.push({
+              role: "user",
+              content:
+                "最终 code_workspace 被拒绝：security_scan 已阻断当前代码。请先修复扫描发现；修改会使旧验证失效，之后必须重新完成全部工程验证。",
+            });
+            continue;
+          }
+          if (
+            !engineeringValidation.buildArtifactId ||
+            latestBuildArtifactId !== engineeringValidation.buildArtifactId
+          ) {
+            engineeringValidation.buildArtifactId = null;
+            engineeringValidation.securityStatus = null;
+          }
+          const nextTool = nextEngineeringValidationTool(engineeringValidation);
+          if (nextTool) {
+            directive = { kind: "force_next_tool", name: nextTool };
+            engineeringValidationActive = true;
+            messages.push({
+              role: "user",
+              content:
+                "最终 code_workspace 被拒绝：最新工作区的工程验证尚未全部通过。下一步必须调用 " +
+                nextTool +
+                "。",
+            });
+            continue;
+          }
+          if (
+            finalValue.buildStatus !== "success" ||
+            finalValue.buildArtifactId !== engineeringValidation.buildArtifactId
+          ) {
+            directive = { kind: "force_final" };
+            messages.push({
+              role: "user",
+              content:
+                "最终 code_workspace 必须引用 Controller 已验证的构建：buildStatus=success，buildArtifactId=" +
+                engineeringValidation.buildArtifactId +
+                "。请修正 JSON，不要调用工具。",
+            });
+            continue;
+          }
+        }
+        const summary =
+          typeof (parsed.data as { summary?: unknown }).summary === "string"
+            ? (parsed.data as { summary: string }).summary.slice(0, 300)
+            : "已完成";
+        return {
+          status: "completed",
+          summary,
+          artifact: parsed.data,
+          issues: [],
+          toolCallsMade,
+        };
       }
-      const correction = directive.kind === "force_final"
-        ? "必须输出符合 schema 的最终 JSON，不要调用任何工具。未通过校验：" + JSON.stringify(parsed.error.issues.slice(0, 8))
-        : "你的输出未通过校验：" + JSON.stringify(parsed.error.issues.slice(0, 8)) + "。请修正后重新输出符合 schema 的 JSON。";
+      const correction =
+        directive.kind === "force_final"
+          ? "必须输出符合 schema 的最终 JSON，不要调用任何工具。未通过校验：" +
+            JSON.stringify(parsed.error.issues.slice(0, 8))
+          : "你的输出未通过校验：" +
+            JSON.stringify(parsed.error.issues.slice(0, 8)) +
+            "。请修正后重新输出符合 schema 的 JSON。";
       messages.push({ role: "user", content: correction });
       continue;
     }
-    const correction = directive.kind === "force_next_tool"
-      ? "Controller 指令：当前必须调用工具 " + directive.name + "。"
-      : directive.kind === "force_final"
-        ? "Controller 指令：请直接输出最终 JSON，不要调用任何工具。"
-        : "你的输出不是合法 JSON：" + extracted.error.slice(0, 200) + "。请重新输出。";
+    const correction =
+      directive.kind === "force_next_tool"
+        ? "Controller 指令：当前必须调用工具 " + directive.name + "。"
+        : directive.kind === "force_final"
+          ? "Controller 指令：请直接输出最终 JSON，不要调用任何工具。"
+          : "你的输出不是合法 JSON：" +
+            extracted.error.slice(0, 200) +
+            "。请重新输出。";
     messages.push({ role: "user", content: correction });
   }
-  throw new ToolLoopError("AGENT_TOOL_BUDGET_EXCEEDED", "该 Agent 的对话轮次超出预算（" + budget.maxRounds + " 轮）");
+  throw new ToolLoopError(
+    "AGENT_TOOL_BUDGET_EXCEEDED",
+    "该 Agent 的对话轮次超出预算（" + budget.maxRounds + " 轮）",
+  );
 }
 
 /** Execute one tool call after controller checks have passed. */
@@ -714,8 +1243,15 @@ async function executeCall(
   startedAt: number,
   stateKey: string,
   semanticKey: string,
-  history: ObservationRecord[]
-): Promise<{ ok: boolean; result: unknown; summary: string; errorCode?: string; artifactIds: string[]; durationMs: number }> {
+  history: ObservationRecord[],
+): Promise<{
+  ok: boolean;
+  result: unknown;
+  summary: string;
+  errorCode?: string;
+  artifactIds: string[];
+  durationMs: number;
+}> {
   // Skip an unchanged call that already failed in the same state.
   const previousFailure = history.find(
     (record) =>
@@ -725,13 +1261,18 @@ async function executeCall(
       record.semanticArgsKey === semanticKey &&
       record.errorCode !== "APPROVAL_REQUIRED" &&
       record.errorCode !== "CONTROLLER_DIRECTIVE" &&
-      record.errorCode !== "DUPLICATE_OBSERVATION"
+      record.errorCode !== "DUPLICATE_OBSERVATION",
   );
   if (previousFailure) {
     return {
       ok: false,
       result: null,
-      summary: "与之前失败的调用完全相同（" + call.name + " + 相同参数 + 错误码 " + previousFailure.errorCode + "），本次未执行。请修复参数后重试，或改用其他工具。",
+      summary:
+        "与之前失败的调用完全相同（" +
+        call.name +
+        " + 相同参数 + 错误码 " +
+        previousFailure.errorCode +
+        "），本次未执行。请修复参数后重试，或改用其他工具。",
       errorCode: "REPEATED_FAILED_CALL",
       artifactIds: [],
       durationMs: 0,
@@ -739,8 +1280,11 @@ async function executeCall(
   }
   try {
     const definition = getToolDefinition(call.name);
-    if (definition?.requiresApproval && !isToolApproved(input.context, call.name)) {
-      const approvalId = createApprovalFor(input.context.runId, call.name);
+    if (
+      definition?.requiresApproval &&
+      !isToolApproved(input.context, call.name)
+    ) {
+      const approvalId = createApprovalFor(input.context, toolCallId, call.name, "工具 " + call.name + " 属于高风险操作，需要用户审批。");
       input.context.emit({
         type: "approval_requested",
         approvalId,
@@ -748,9 +1292,13 @@ async function executeCall(
         toolName: call.name,
         reason: "工具 " + call.name + " 属于高风险操作，需要用户审批后重试。",
       });
-      throw new ToolExecutionError("APPROVAL_REQUIRED", "工具需要用户审批（approvalId: " + approvalId + "）", true);
+      await waitForApproval(approvalId, input.context.signal);
     }
-    const result = await executeTool(call.name, parseToolArgs(call), input.context);
+    const result = await executeTool(
+      call.name,
+      parseToolArgs(call),
+      input.context,
+    );
     return {
       ok: true,
       result,
@@ -760,13 +1308,24 @@ async function executeCall(
     };
   } catch (error) {
     if (input.context.signal.aborted || isAbortLike(error)) throw error;
-    const shape = isToolError(error) || error instanceof ToolExecutionError
-      ? { code: (error as { code: string }).code, message: error instanceof Error ? error.message : "工具执行失败" }
-      : { code: "TOOL_ERROR", message: error instanceof Error ? error.message.slice(0, 300) : "工具执行失败" };
+    const shape =
+      isToolError(error) || error instanceof ToolExecutionError
+        ? {
+            code: (error as { code: string }).code,
+            message: error instanceof Error ? error.message : "工具执行失败",
+          }
+        : {
+            code: "TOOL_ERROR",
+            message:
+              error instanceof Error
+                ? error.message.slice(0, 300)
+                : "工具执行失败",
+          };
     return {
       ok: false,
       result: null,
-      summary: shape.message.slice(0, 300),
+      // Tool messages carry actionable diagnostics; emitted UI events are sliced to 300 above.
+      summary: shape.message.slice(0, 3000),
       errorCode: shape.code.slice(0, 60),
       artifactIds: [],
       durationMs: Date.now() - startedAt,
@@ -784,60 +1343,143 @@ function parseToolArgs(call: ToolCall): unknown {
 
 function summarizeArgs(call: ToolCall): string {
   try {
-    const parsed = JSON.parse(call.rawArguments || "{}") as Record<string, unknown>;
+    const parsed = JSON.parse(call.rawArguments || "{}") as Record<
+      string,
+      unknown
+    >;
     const entries = Object.entries(parsed)
       .filter(([key, value]) => key !== "task" && value != null)
       .map(([key, value]) => key + "=" + String(value).slice(0, 40))
       .join(", ");
-    const task = typeof parsed.task === "string" ? parsed.task.slice(0, 80) : "";
+    const task =
+      typeof parsed.task === "string" ? parsed.task.slice(0, 80) : "";
     // The client event schema caps inputSummary length; truncate server-side or events get dropped.
-    return ((task ? "task:" + task + " " : "") + entries.slice(0, 160)).slice(0, 240);
+    return ((task ? "task:" + task + " " : "") + entries.slice(0, 160)).slice(
+      0,
+      240,
+    );
   } catch {
     return call.rawArguments.slice(0, 160);
   }
 }
 
 function summarizeResult(toolName: string, result: unknown): string {
-  const record = (typeof result === "object" && result !== null ? result : {}) as Record<string, unknown>;
-  const str = (value: unknown): string => (typeof value === "string" ? value : "");
-  const num = (value: unknown): number => (typeof value === "number" ? value : Number(value) || 0);
-  const len = (value: unknown): number => (Array.isArray(value) ? value.length : 0);
+  const record = (
+    typeof result === "object" && result !== null ? result : {}
+  ) as Record<string, unknown>;
+  const str = (value: unknown): string =>
+    typeof value === "string" ? value : "";
+  const num = (value: unknown): number =>
+    typeof value === "number" ? value : Number(value) || 0;
+  const len = (value: unknown): number =>
+    Array.isArray(value) ? value.length : 0;
 
   switch (toolName) {
     case "delegate_to_agent": {
-      const r = record as { targetRole?: string; status?: string; summary?: string };
-      return "已委派 " + (r.targetRole ?? "") + "：" + (r.status ?? "") + " " + (r.summary ?? "").slice(0, 120);
+      const r = record as {
+        targetRole?: string;
+        status?: string;
+        summary?: string;
+      };
+      return (
+        "已委派 " +
+        (r.targetRole ?? "") +
+        "：" +
+        (r.status ?? "") +
+        " " +
+        (r.summary ?? "").slice(0, 120)
+      );
     }
     case "search_references":
       return "找到 " + len(record.results) + " 条参考";
     case "open_reference":
       return "读取参考：" + str(record.title).slice(0, 120);
     case "inspect_current_app":
-      return record.hasApp ? "当前应用：" + str(record.appSummary).slice(0, 160) : "当前没有可用应用";
+      return record.hasApp
+        ? "当前应用：" + str(record.appSummary).slice(0, 160)
+        : "当前没有可用应用";
     case "workspace_init":
-      return "工作区就绪（" + SEEDED_LABELS[str(record.seededFrom)] + "）· " + num(record.fileCount) + " 个文件";
+      return (
+        "工作区就绪（" +
+        SEEDED_LABELS[str(record.seededFrom)] +
+        "）· " +
+        num(record.fileCount) +
+        " 个文件"
+      );
     case "workspace_get_manifest":
-      return record.exists === false ? "manifest 尚未创建（新工作区正常状态）" : "manifest：「" + str(record.name) + "」· " + len(record.collections) + " 个集合 · " + len(record.dependencies) + " 个依赖";
+      return record.exists === false
+        ? "manifest 尚未创建（新工作区正常状态）"
+        : "manifest：「" +
+            str(record.name) +
+            "」· " +
+            len(record.collections) +
+            " 个集合 · " +
+            len(record.dependencies) +
+            " 个依赖";
     case "workspace_list_files":
-      return "共 " + len(record.entries) + " 项" + (record.truncated ? "（已截断）" : "");
+      return (
+        "共 " +
+        len(record.entries) +
+        " 项" +
+        (record.truncated ? "（已截断）" : "")
+      );
     case "dependency_list":
-      return "已声明 " + len(record.dependencies) + " 个依赖 · allowlist " + len(record.allowlist) + " 项";
+      return (
+        "已声明 " +
+        len(record.dependencies) +
+        " 个依赖 · allowlist " +
+        len(record.allowlist) +
+        " 项"
+      );
     case "dependency_add":
       return "添加依赖 " + str(record.name) + "@" + str(record.version);
     case "dependency_remove":
-      return (record.removed ? "已移除依赖 " : "依赖未声明：") + str(record.name);
+      return (
+        (record.removed ? "已移除依赖 " : "依赖未声明：") + str(record.name)
+      );
     case "fs_write":
-      return "写入 " + str(record.path) + "（" + num(record.bytesWritten) + " 字节）· " + str(record.diffSummary);
+      return (
+        "写入 " +
+        str(record.path) +
+        "（" +
+        num(record.bytesWritten) +
+        " 字节）· " +
+        str(record.diffSummary)
+      );
     case "fs_patch":
-      return "修改 " + str(record.path) + "（" + num(record.replaced) + " 处）· " + str(record.diffSummary);
+      return (
+        "修改 " +
+        str(record.path) +
+        "（" +
+        num(record.replaced) +
+        " 处）· " +
+        str(record.diffSummary)
+      );
     case "fs_read":
-      return "读取 " + str(record.path) + (record.truncated ? "（已截断）" : "");
+      return (
+        "读取 " + str(record.path) + (record.truncated ? "（已截断）" : "")
+      );
     case "fs_list":
       return "列出 " + len(record.entries) + " 项";
     case "fs_stat":
-      return "stat " + str(record.path) + "（" + str(record.type) + " · " + num(record.size) + " 字节）";
+      return (
+        "stat " +
+        str(record.path) +
+        "（" +
+        str(record.type) +
+        " · " +
+        num(record.size) +
+        " 字节）"
+      );
     case "bash":
-      return "命令 exitCode=" + num(record.exitCode) + (record.timedOut ? "（超时）" : "") + " · 输出 " + num(str(record.stdout).length) + " 字符";
+      return (
+        "命令 exitCode=" +
+        num(record.exitCode) +
+        (record.timedOut ? "（超时）" : "") +
+        " · 输出 " +
+        num(str(record.stdout).length) +
+        " 字符"
+      );
     case "fs_delete":
       return "已删除 " + str(record.path) + (record.soft ? "（软删除）" : "");
     case "fs_create_dir":
@@ -847,11 +1489,22 @@ function summarizeResult(toolName: string, result: unknown): string {
     case "fs_move":
       return "移动 " + str(record.from) + " → " + str(record.to);
     case "run_format":
-      return "已检查 " + num(record.formatted) + " 个文件，改写 " + num(record.changed) + " 个";
+      return (
+        "已检查 " +
+        num(record.formatted) +
+        " 个文件，改写 " +
+        num(record.changed) +
+        " 个"
+      );
     case "run_lint":
     case "run_typecheck":
     case "run_tests": {
-      const label = toolName === "run_lint" ? "Lint" : toolName === "run_typecheck" ? "类型检查" : "测试";
+      const label =
+        toolName === "run_lint"
+          ? "Lint"
+          : toolName === "run_typecheck"
+            ? "类型检查"
+            : "测试";
       const status = str(record.status);
       if (status === "passed") return label + "通过";
       if (status === "timeout") return label + "超时";
@@ -863,16 +1516,27 @@ function summarizeResult(toolName: string, result: unknown): string {
         : "构建失败：" + (str(record.errorCode) || "BUILD_FAILED");
     case "get_build_errors":
       return record.hasReport
-        ? "最近构建：" + (record.status === "success" ? "成功" : "失败（" + str(record.errorCode) + "）")
+        ? "最近构建：" +
+            (record.status === "success"
+              ? "成功"
+              : "失败（" + str(record.errorCode) + "）")
         : "暂无构建报告";
     case "get_test_failures":
-      return record.hasReport ? "最近测试：" + (record.status === "passed" ? "通过" : "失败") : "暂无测试报告";
+      return record.hasReport
+        ? "最近测试：" + (record.status === "passed" ? "通过" : "失败")
+        : "暂无测试报告";
     case "security_scan":
       return record.status === "pass"
         ? "静态扫描通过（" + num(record.filesScanned) + " 个文件）"
         : "发现 " + len(record.findings) + " 项阻断问题";
     case "create_code_snapshot":
-      return "快照 " + str(record.snapshotId).slice(0, 12) + "…（" + len(record.files) + " 个文件）";
+      return (
+        "快照 " +
+        str(record.snapshotId).slice(0, 12) +
+        "…（" +
+        len(record.files) +
+        " 个文件）"
+      );
     case "restore_code_snapshot":
       return "已恢复 " + num(record.restored) + " 个文件";
     case "render_preview": {
@@ -882,7 +1546,12 @@ function summarizeResult(toolName: string, result: unknown): string {
     case "complete_run":
       return "运行已完成";
     case "query_records":
-      return "查询到 " + len(record.records) + " 条记录" + (record.truncated ? "（已截断）" : "");
+      return (
+        "查询到 " +
+        len(record.records) +
+        " 条记录" +
+        (record.truncated ? "（已截断）" : "")
+      );
     case "count_records":
       return "共 " + num(record.count) + " 条记录";
     case "aggregate_records":
@@ -894,14 +1563,14 @@ function summarizeResult(toolName: string, result: unknown): string {
       return record.updated ? "已更新记录" : "记录未更新";
     case "delete_record":
       return record.deleted ? "已删除记录" : "记录未删除";
-    case "seed_demo_data":
-      return "写入演示数据 " + num(record.seeded) + " 条";
     case "create_artifact":
       return "已保存 artifact（" + str(record.artifactId).slice(0, 12) + "…）";
     case "get_artifact":
       return "artifact：" + str(record.kind);
     case "compare_artifacts":
-      return record.sameKind ? "同类 artifact · 差异 " + len(record.changedKeys) + " 项" : "不同类 artifact";
+      return record.sameKind
+        ? "同类 artifact · 差异 " + len(record.changedKeys) + " 项"
+        : "不同类 artifact";
     default:
       break;
   }
@@ -922,7 +1591,8 @@ const SEEDED_LABELS: Record<string, string> = {
 
 function compactValue(value: unknown): string {
   if (typeof value === "string") return value.slice(0, 48);
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "number" || typeof value === "boolean")
+    return String(value);
   if (Array.isArray(value)) return value.length + " 项";
   if (typeof value === "object") {
     const text = JSON.stringify(value);
@@ -931,12 +1601,22 @@ function compactValue(value: unknown): string {
   return String(value ?? "");
 }
 
-function createApprovalFor(runId: string, toolName: string): string {
-  return createApproval(runId, toolName);
+function createApprovalFor(context: ToolExecutionContext, toolCallId: string, toolName: string, reason: string): string {
+  return createApproval(context.runId, toolName, {
+    projectId: context.projectId,
+    taskId: context.taskId,
+    toolCallId,
+    reason,
+  });
 }
 
-function isToolApproved(context: ToolExecutionContext, toolName: string): boolean {
-  return context.approvedTools.has(toolName) || isApproved(context.runId, toolName);
+function isToolApproved(
+  context: ToolExecutionContext,
+  toolName: string,
+): boolean {
+  return (
+    context.approvedTools.has(toolName) || isApproved(context.runId, toolName)
+  );
 }
 
 function collectArtifactIds(result: unknown): string[] {
@@ -944,7 +1624,8 @@ function collectArtifactIds(result: unknown): string[] {
   const record = result as Record<string, unknown>;
   const ids: string[] = [];
   if (typeof record.artifactId === "string") ids.push(record.artifactId);
-  if (typeof record.previewArtifactId === "string") ids.push(record.previewArtifactId);
+  if (typeof record.previewArtifactId === "string")
+    ids.push(record.previewArtifactId);
   return ids.slice(0, 12);
 }
 
@@ -960,4 +1641,69 @@ interface RunAgentInput {
   requireToolCall: boolean;
   /** Test injection: overrides the model provider from getProvider(). */
   providerOverride?: AIProvider;
+}
+
+interface ProgressSummaryState {
+  phase: ProgressPhase | null;
+  lastStartedAt: number;
+  sequence: number;
+  inFlight: Promise<void> | null;
+}
+
+function progressPhaseForTurn(roleId: RoleId, toolCalls: ToolCall[]): ProgressPhase {
+  if (roleId === "team_leader") {
+    return toolCalls.some((call) => call.name === "render_preview" || call.name === "complete_run")
+      ? "previewing"
+      : "planning";
+  }
+  if (roleId === "engineer") {
+    return toolCalls.some((call) => PROGRESS_VALIDATION_TOOLS.has(call.name))
+      ? "validating"
+      : "coding";
+  }
+  return "planning";
+}
+
+/** Fire an isolated summary request without holding up the primary tool loop. */
+function scheduleProgressSummary(
+  input: RunAgentInput,
+  provider: AIProvider,
+  reasoningContent: string,
+  phase: ProgressPhase,
+  state: ProgressSummaryState,
+): boolean {
+  if (!provider.summarizeProgress) return false;
+  reasoningContent = reasoningContent.trim();
+  if (reasoningContent.length < 24 || input.context.signal.aborted) return false;
+  const now = Date.now();
+  const phaseChanged = state.phase !== phase;
+  if ((!phaseChanged && state.inFlight) || (!phaseChanged && now - state.lastStartedAt < PROGRESS_SUMMARY_COOLDOWN_MS)) {
+    return false;
+  }
+  state.phase = phase;
+  state.lastStartedAt = now;
+  const sequence = ++state.sequence;
+  const pending = Promise.resolve()
+    .then(() => provider.summarizeProgress!({ roleId: input.roleId, phase, reasoningContent, signal: input.context.signal }))
+    .then((summary) => {
+      // A later phase supersedes an older in-flight response.
+      if (sequence !== state.sequence || input.context.signal.aborted || !summary) return;
+      const safe = sanitizeProgressSummary(summary);
+      if (!safe) return;
+      input.context.emit({
+        type: "progress_summary",
+        agentRunId: input.agentRunId,
+        roleId: input.roleId,
+        phase,
+        summary: safe,
+      });
+    })
+    .catch(() => {
+      // Progress is best-effort and must never change the main agent result.
+    })
+    .finally(() => {
+      if (state.inFlight === pending) state.inFlight = null;
+    });
+  state.inFlight = pending;
+  return true;
 }

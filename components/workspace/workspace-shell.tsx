@@ -58,9 +58,8 @@ function WorkspaceInner() {
     baselineReady: false,
   });
 
-  // Restore preferences once after the project loads: sync the baseline
-  // (hasSpec/runningTaskId) so a restored existing AppSpec is not mistaken for a
-  // new build success that would auto-expand Preview
+  // Restore preferences once after the project loads so an existing preview is not
+  // mistaken for a new build success that would auto-expand Preview.
   useEffect(() => {
     if (state.phase === "ready" && !prevRef.current.restored) {
       prevRef.current = {
@@ -72,7 +71,6 @@ function WorkspaceInner() {
       policy.notify({
         type: "restore_prefs",
         saved: state.prefs.rightPreview,
-        hasAppSpec: hasPreviewNow,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -343,7 +341,7 @@ function ResetDialog({ open, onOpenChange }: { open: boolean; onOpenChange(open:
         <DialogHeader>
           <DialogTitle>重置项目？</DialogTitle>
           <DialogDescription>
-            将清除所有对话、消息、构建记录、AppSpec 与全部应用数据，且无法恢复。
+            将清除所有对话、消息、代码快照、构建记录与全部应用数据，且无法恢复。
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

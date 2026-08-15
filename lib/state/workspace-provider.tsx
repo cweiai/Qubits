@@ -61,6 +61,7 @@ interface WorkspaceContextValue {
   setPreferences(prefs: WorkspacePreferences): void;
   refreshPreview(): void;
   clearError(): void;
+  resolveApproval(approvalId: string, decision: "grant" | "deny"): Promise<void>;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -108,6 +109,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         messages: messagesToViews(detail.messages),
         tasks: detail.tasks.map((task) => taskToView(task)),
         app: detail.conversation.app ?? { manifest: null, previewVersion: 0, previewBundleId: null, currentSnapshotId: null },
+        pendingApprovals: detail.pendingApprovals ?? [],
       });
     } catch (error) {
       if (seq !== loadSeqRef.current) return;
@@ -138,9 +140,10 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         (message) => dispatch({ type: "task-error", taskId, message, now: Date.now() })
       );
       try {
-        const { tasks } = await api.getConversation(conversationId);
+        const detail = await api.getConversation(conversationId);
         if (stateRef.current.currentConversationId === conversationId) {
-          dispatch({ type: "task-refreshed", tasks });
+          dispatch({ type: "task-refreshed", tasks: detail.tasks });
+          dispatch({ type: "approvals-refreshed", approvals: detail.pendingApprovals ?? [] });
         }
       } catch {
         // ignore
@@ -314,9 +317,10 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         dispatch({ type: "task-created", task: result.task, conversationId });
         dispatch({ type: "set-error", message: null }); // clear the global error banner
         if (result.deduplicated) {
-          const { tasks } = await api.getConversation(conversationId);
+          const detail = await api.getConversation(conversationId);
           if (stateRef.current.currentConversationId === conversationId) {
-            dispatch({ type: "task-refreshed", tasks });
+            dispatch({ type: "task-refreshed", tasks: detail.tasks });
+            dispatch({ type: "approvals-refreshed", approvals: detail.pendingApprovals ?? [] });
           }
           return true;
         }
@@ -373,6 +377,14 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
 
   const refreshPreview = useCallback(() => dispatch({ type: "refresh-tick" }), []);
   const clearError = useCallback(() => dispatch({ type: "set-error", message: null }), []);
+  const resolveApproval = useCallback(async (approvalId: string, decision: "grant" | "deny") => {
+    try {
+      await api.resolveApproval(approvalId, decision);
+      dispatch({ type: "approval-resolved", approvalId });
+    } catch (error) {
+      dispatch({ type: "set-error", message: friendlyError(error) });
+    }
+  }, []);
 
   const value = useMemo<WorkspaceContextValue>(() => {
     const runningTaskView = state.tasks.find((t) => t.status === "running" || t.status === "pending") ?? null;
@@ -430,8 +442,9 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       setPreferences,
       refreshPreview,
       clearError,
+      resolveApproval,
     };
-  }, [state, switchConversation, createConversation, renameConversation, setConversationStatus, deleteConversation, submitPrompt, retryTask, resetProject, setPreviewDevice, setPreferences, refreshPreview, clearError]);
+  }, [state, switchConversation, createConversation, renameConversation, setConversationStatus, deleteConversation, submitPrompt, retryTask, resetProject, setPreviewDevice, setPreferences, refreshPreview, clearError, resolveApproval]);
 
   if (!mounted) {
     return <div className="flex h-dvh items-center justify-center text-sm text-muted-foreground">正在加载工作台…</div>;

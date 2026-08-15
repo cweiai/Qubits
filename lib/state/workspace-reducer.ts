@@ -1,6 +1,6 @@
 import { ROLE_RUNNING_TEXT, type AgentEvent, type RoleId } from "@/lib/contracts/agent-events";
 import { type ConversationMessage } from "@/lib/contracts/conversation";
-import type { ConversationSummary, TaskJson } from "@/lib/workspace/api";
+import type { ApprovalJson, ConversationSummary, TaskJson } from "@/lib/workspace/api";
 import { taskToView, type AgentRunView, type TaskView } from "@/lib/workspace/message-view";
 import type { WorkspacePreferences } from "@/lib/storage/project-storage";
 
@@ -30,6 +30,15 @@ interface WorkspaceState {
   workspaceError: string | null;
   refreshTick: number;
   prefs: WorkspacePreferences;
+  pendingApprovals: ApprovalRequestView[];
+}
+
+export interface ApprovalRequestView {
+  approvalId: string;
+  taskId: string;
+  toolCallId: string;
+  toolName: string;
+  reason: string;
 }
 
 type WorkspaceAction =
@@ -47,6 +56,7 @@ type WorkspaceAction =
       messages: ConversationMessage[];
       tasks: TaskView[];
       app: { manifest: unknown; previewVersion: number; previewBundleId: string | null; currentSnapshotId: string | null };
+      pendingApprovals: ApprovalJson[];
     }
   | { type: "set-messages-loading"; value: boolean }
   | { type: "add-conversation"; conversation: ConversationSummary }
@@ -56,7 +66,9 @@ type WorkspaceAction =
   | { type: "add-message"; message: ConversationMessage }
   | { type: "task-event"; taskId: string; event: AgentEvent; now: number }
   | { type: "task-refreshed"; tasks: TaskJson[] }
+  | { type: "approvals-refreshed"; approvals: ApprovalJson[] }
   | { type: "task-error"; taskId: string; message: string; now: number }
+  | { type: "approval-resolved"; approvalId: string }
   | { type: "set-running"; task: { taskId: string; conversationId: string } | null }
   | { type: "set-error"; message: string | null }
   | { type: "refresh-tick" }
@@ -82,6 +94,7 @@ export function createWorkspaceState(prefs: WorkspacePreferences): WorkspaceStat
     workspaceError: null,
     refreshTick: 0,
     prefs,
+    pendingApprovals: [],
   };
 }
 
@@ -140,6 +153,7 @@ function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent
   let previewVersion = state.previewVersion;
   let previewBundleId = state.previewBundleId;
   let appSpec = state.appSpec; // legacy read-only draft
+  let pendingApprovals = state.pendingApprovals;
 
   const patchTask = (patch: (t: TaskView) => TaskView) => {
     tasks = tasks.map((t) => (t.id === taskId ? patch(t) : t));
@@ -172,6 +186,23 @@ function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent
         ...t,
         roles: { ...t.roles, [event.roleId]: { ...(t.roles[event.roleId] ?? { status: "pending", summary: null, startedAt: null, completedAt: null }), status: "running", startedAt: now } },
         agentRuns: upsertAgentRun(t.agentRuns, { agentRunId: event.agentRunId, roleId: event.roleId, parentAgentRunId: event.parentAgentRunId, status: "running", taskSummary: event.taskSummary, summary: null, artifactId: null, errorMessage: null, timestamp: now }),
+      }));
+      break;
+    }
+    case "progress_summary": {
+      patchTask((t) => ({
+        ...t,
+        stage: event.phase,
+        roles: {
+          ...t.roles,
+          [event.roleId]: {
+            ...(t.roles[event.roleId] ?? { status: "running", summary: null, startedAt: now, completedAt: null }),
+            summary: event.summary,
+          },
+        },
+        agentRuns: t.agentRuns.map((run) =>
+          run.agentRunId === event.agentRunId ? { ...run, summary: event.summary } : run
+        ),
       }));
       break;
     }
@@ -234,13 +265,26 @@ function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent
             : te
         ),
       }));
+      pendingApprovals = pendingApprovals.filter((approval) => approval.toolCallId !== event.toolCallId);
+      break;
+    }
+    case "approval_requested": {
+      if (!pendingApprovals.some((approval) => approval.approvalId === event.approvalId)) {
+        pendingApprovals = [...pendingApprovals, {
+          approvalId: event.approvalId,
+          taskId,
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          reason: event.reason,
+        }];
+      }
       break;
     }
     case "reference_found": {
       patchTask((t) => ({
         ...t,
         references: [...t.references, { resultId: event.resultId, title: event.title, url: event.url, domain: event.domain, snippet: event.snippet, source: event.source }],
-        toolEvents: [...t.toolEvents, { toolCallId: "ref:" + event.resultId, agentRunId: "", roleId: "researcher", toolName: "search_references", status: "success", inputSummary: "", resultSummary: event.title, errorCode: null, timestamp: now, reference: { resultId: event.resultId, title: event.title, url: event.url, domain: event.domain, snippet: event.snippet, source: event.source } }],
+        toolEvents: [...t.toolEvents, { toolCallId: "ref:" + event.resultId, agentRunId: "", roleId: "team_leader", toolName: "search_references", status: "success", inputSummary: "", resultSummary: event.title, errorCode: null, timestamp: now, reference: { resultId: event.resultId, title: event.title, url: event.url, domain: event.domain, snippet: event.snippet, source: event.source } }],
       }));
       break;
     }
@@ -254,7 +298,7 @@ function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent
         type: "system",
         runId: taskId,
         roleId: null,
-        text: "应用「" + event.appName + "」已通过构建与评审并更新预览（v" + event.version + "）。",
+        text: "应用「" + event.appName + "」已通过构建、测试与安全扫描并更新预览（v" + event.version + "）。",
         artifact: null,
         status: null,
         timestamp: now,
@@ -350,7 +394,7 @@ function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent
     case "done":
       break;
   }
-  return { ...state, tasks, messages, manifest, previewVersion, previewBundleId, appSpec };
+  return { ...state, tasks, messages, manifest, previewVersion, previewBundleId, appSpec, pendingApprovals };
 }
 
 export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
@@ -378,6 +422,9 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         previewBundleId: action.app.previewBundleId,
         currentSnapshotId: action.app.currentSnapshotId,
         messagesLoading: false,
+        pendingApprovals: action.pendingApprovals
+          .filter((approval) => approval.status === "pending" && approval.taskId !== null && approval.toolCallId !== null)
+          .map((approval) => ({ approvalId: approval.approvalId, taskId: approval.taskId!, toolCallId: approval.toolCallId!, toolName: approval.toolName, reason: approval.reason })),
       };
     case "set-messages-loading":
       return { ...state, messagesLoading: action.value };
@@ -401,6 +448,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         // A new attempt replaces the old failure result: clear error cards (history stays on the server).
         messages: state.messages.filter((m) => m.type !== "error"),
         workspaceError: null,
+        pendingApprovals: state.pendingApprovals.filter((approval) => approval.taskId !== action.task.id),
         conversations: state.conversations.map((c) =>
           c.id === action.conversationId ? { ...c, lastTask: action.task } : c
         ),
@@ -412,6 +460,13 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       return applyTaskEvent(state, action.taskId, action.event, action.now);
     case "task-refreshed":
       return { ...state, tasks: action.tasks.map(taskToView) };
+    case "approvals-refreshed":
+      return {
+        ...state,
+        pendingApprovals: action.approvals
+          .filter((approval) => approval.status === "pending" && approval.taskId !== null && approval.toolCallId !== null)
+          .map((approval) => ({ approvalId: approval.approvalId, taskId: approval.taskId!, toolCallId: approval.toolCallId!, toolName: approval.toolName, reason: approval.reason })),
+      };
     case "task-error": {
       const message: ConversationMessage = {
         id: "live:" + action.taskId + ":neterr",
@@ -434,6 +489,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         })),
       };
     }
+    case "approval-resolved":
+      return { ...state, pendingApprovals: state.pendingApprovals.filter((approval) => approval.approvalId !== action.approvalId) };
     case "set-running":
       return { ...state, runningTask: action.task };
     case "set-error":

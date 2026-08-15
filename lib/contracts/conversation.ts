@@ -8,12 +8,7 @@ const messageTypeSchema = z.enum([
   "user",
   "team_leader",
   "product_manager",
-  "researcher",
-  "architect",
   "engineer",
-  "data_scientist",
-  "reviewer",
-  "security_reviewer",
   "system",
   "error",
 ]);
@@ -40,11 +35,10 @@ export type RoleState = z.infer<typeof roleStateSchema>;
 export const pipelineStageSchema = z.enum([
   "idle",
   "planning",
-  "architecting",
   "coding",
   "validating",
-  "reviewing",
   "previewing",
+  "awaiting_approval",
   "ready",
   "failed",
 ]);
@@ -53,11 +47,10 @@ export type PipelineStage = z.infer<typeof pipelineStageSchema>;
 export const STAGE_LABELS: Record<PipelineStage, string> = {
   idle: "空闲",
   planning: "规划中",
-  architecting: "架构设计中",
   coding: "编写代码中",
   validating: "构建验证中",
-  reviewing: "安全审校中",
   previewing: "预览提交中",
+  awaiting_approval: "等待用户审批",
   ready: "就绪",
   failed: "失败",
 };

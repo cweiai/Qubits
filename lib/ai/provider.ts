@@ -1,7 +1,6 @@
 import "server-only";
-import type { RoleId } from "@/lib/contracts/agent-events";
+import type { ProgressPhase, RoleId } from "@/lib/contracts/agent-events";
 import { openaiProvider } from "./openai-provider";
-import { mockProvider } from "./mock-provider";
 
 /**
  * Model provider abstraction for the real tool-calling protocol.
@@ -51,6 +50,8 @@ export interface GenerateWithToolsInput {
   signal?: AbortSignal;
   /** Controller directive for this round (defaults to auto). */
   toolChoice?: ToolChoiceSpec;
+  /** Ephemeral server-only stream hook; callers must never persist or forward raw reasoning. */
+  onReasoningDelta?: (delta: string) => void;
 }
 
 export interface AgentTurnResponse {
@@ -59,13 +60,22 @@ export interface AgentTurnResponse {
   reasoningContent: string | null;
 }
 
-export interface AIProvider {
-  readonly kind: "openai" | "mock";
-  generateWithTools(input: GenerateWithToolsInput): Promise<AgentTurnResponse>;
+export interface ProgressSummaryInput {
+  roleId: RoleId;
+  phase: ProgressPhase;
+  reasoningContent: string;
+  signal?: AbortSignal;
 }
 
-/** The real LLM provider in use; falls back to the test mock when QUIBITS_MOCK_PROVIDER=true. */
+export interface AIProvider {
+  /** Provider identifier is diagnostic only; production getProvider returns openai. */
+  readonly kind: string;
+  generateWithTools(input: GenerateWithToolsInput): Promise<AgentTurnResponse>;
+  /** Optional side-channel summarizer. Failure must never affect the main agent loop. */
+  summarizeProgress?(input: ProgressSummaryInput): Promise<string | null>;
+}
+
+/** Production always uses the configured model service; tests inject a provider explicitly. */
 export function getProvider(): AIProvider {
-  if (process.env.QUIBITS_MOCK_PROVIDER === "true") return mockProvider;
   return openaiProvider;
 }

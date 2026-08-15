@@ -4,16 +4,12 @@ import type { ArtifactKind, ServerToolDefinition } from "./types";
 import { delegateToAgentArgsSchema, delegateToAgentResultSchema } from "./schemas";
 import { SearchProviderError } from "./search-provider";
 
-const DELEGATABLE_ROLES = ["product_manager", "researcher", "architect", "engineer", "data_scientist", "reviewer"] as const;
+const DELEGATABLE_ROLES = ["product_manager", "engineer"] as const;
 
 /** Server-enforced targetRole ↔ expectedOutput correspondence. */
 const ROLE_OUTPUT_MAP: Record<string, string> = {
   product_manager: "product_brief",
-  researcher: "research_report",
-  architect: "app_blueprint",
   engineer: "code_workspace",
-  data_scientist: "data_report",
-  reviewer: "review_report",
 };
 
 /**
@@ -24,7 +20,7 @@ const ROLE_OUTPUT_MAP: Record<string, string> = {
 export const delegateToAgentTool: ServerToolDefinition<z.infer<typeof delegateToAgentArgsSchema>, z.infer<typeof delegateToAgentResultSchema>> = {
   name: "delegate_to_agent",
   description:
-    "把任务分配给子 Agent（艾玛/鲍勃/亚历克斯/大卫/艾瑞斯/评审员）并等待其真实完成。子 Agent 通过自己的系统提示词与工具集合执行，结果以结构化产物返回。只有迈克可以调用。",
+    "把任务分配给子 Agent（艾玛或亚历克斯）并等待其真实完成。子 Agent 通过自己的系统提示词与工具集合执行，结果以结构化产物返回。只有迈克可以调用。",
   argsSchema: delegateToAgentArgsSchema,
   resultSchema: delegateToAgentResultSchema,
   allowedRoles: ["team_leader"],
@@ -101,7 +97,7 @@ export const delegateToAgentTool: ServerToolDefinition<z.infer<typeof delegateTo
     // Expose the real run artifacts (build/test/preview) produced during this child run,
     // so Mike can reference them for render_preview — ids come from the ArtifactStore, never prose.
     const relatedArtifacts: Array<{ kind: string; artifactId: string }> = [];
-    for (const kind of ["build_report", "preview_bundle", "test_report", "review_report"] as const) {
+    for (const kind of ["build_report", "preview_bundle", "test_report", "security_report"] as const) {
       const ref = context.artifacts.findLatest(kind);
       if (ref) relatedArtifacts.push({ kind, artifactId: ref.id });
     }

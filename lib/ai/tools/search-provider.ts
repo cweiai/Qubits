@@ -5,7 +5,6 @@ import { referenceSearchResultSchema } from "./schemas";
 /**
  * Reference search adapter: real search can only enter through here.
  * - none: unconfigured → SEARCH_NOT_CONFIGURED (never return fake results);
- * - mock: test/local demo only (must be explicitly configured, results carry a mock marker);
  * - generic: an OpenAI-compatible search endpoint configured via env (self-hosted Brave/Tavily proxy).
  * API keys are read only from server-side environment variables.
  */
@@ -87,27 +86,6 @@ function toResult(input: { title?: unknown; url?: unknown; domain?: unknown; sni
   });
 }
 
-const MOCK_RESULTS = [
-  { title: "Qubits 文档：受限 AppSpec 与沙盒渲染", url: "https://docs.example.com/qubits/sandbox", domain: "docs.example.com", snippet: "关于沙盒 iframe、MessageChannel 与数据代理的官方文档（Mock，仅测试）。" },
-  { title: "任务管理应用设计模式", url: "https://example.com/task-app-patterns", domain: "example.com", snippet: "常见任务管理单页应用的交互与信息架构模式（Mock，仅测试）。" },
-];
-
-const mockProvider: ReferenceSearchProvider = {
-  kind: "mock",
-  async search(input) {
-    const count = Math.min(input.maxResults, MOCK_RESULTS.length);
-    return MOCK_RESULTS.slice(0, count).map((item, index) => ({
-      resultId: "ref-mock-" + index + "-" + Math.random().toString(36).slice(2, 6),
-      title: item.title,
-      url: item.url,
-      domain: item.domain,
-      snippet: item.snippet,
-      source: "mock",
-      publishedAt: null,
-    }));
-  },
-};
-
 const noneProvider: ReferenceSearchProvider = {
   kind: "none",
   async search() {
@@ -165,7 +143,6 @@ const genericProvider: ReferenceSearchProvider = {
 export function getSearchProvider(): ReferenceSearchProvider {
   const kind = process.env.REFERENCE_SEARCH_PROVIDER || "none";
   if (kind === "none") return noneProvider;
-  if (kind === "mock") return mockProvider;
   if (kind === "generic" || kind === "brave" || kind === "tavily") return genericProvider;
   return noneProvider;
 }

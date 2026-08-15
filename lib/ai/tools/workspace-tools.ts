@@ -1,9 +1,10 @@
 import "server-only";
 import { existsSync } from "node:fs";
 import { z } from "zod";
-import { transform as esbuildTransform } from "esbuild";
+import { format as prettierFormat } from "prettier";
 import { getManifestIssues, MANIFEST_FILE_NAME } from "@/lib/contracts/manifest";
 import type { ServerToolDefinition, ToolExecutionContext } from "./types";
+import { invalidateQualityGates } from "./types";
 import {
   createCodeSnapshotArgsSchema,
   createCodeSnapshotResultSchema,
@@ -77,10 +78,10 @@ export const workspaceInitTool: ServerToolDefinition<z.infer<typeof workspaceIni
 
 export const workspaceGetManifestTool: ServerToolDefinition<z.infer<typeof workspaceGetManifestArgsSchema>, z.infer<typeof workspaceGetManifestResultSchema>> = {
   name: "workspace_get_manifest",
-  description: "读取并校验当前工作区的 qubits.manifest.json。新工作区尚未创建 manifest 属正常：返回 { exists: false }，而不是错误（构建/评审阶段才强制要求 manifest 存在且有效）。",
+  description: "读取并校验当前工作区的 qubits.manifest.json。新工作区尚未创建 manifest 属正常：返回 { exists: false }，而不是错误（构建/安全扫描阶段才强制要求 manifest 存在且有效）。",
   argsSchema: workspaceGetManifestArgsSchema,
   resultSchema: workspaceGetManifestResultSchema,
-  allowedRoles: ["engineer", "reviewer", "security_reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
@@ -116,7 +117,7 @@ export const workspaceListFilesTool: ServerToolDefinition<z.infer<typeof workspa
   description: "列出工作区文件树（标记系统维护文件；只返回工作区相对路径）。",
   argsSchema: workspaceListFilesArgsSchema,
   resultSchema: workspaceListFilesResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -136,7 +137,7 @@ export const dependencyListTool: ServerToolDefinition<z.infer<typeof dependencyL
   description: "列出工作区已声明依赖与服务器依赖 allowlist（固定版本）。",
   argsSchema: dependencyListArgsSchema,
   resultSchema: dependencyListResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
@@ -144,6 +145,7 @@ export const dependencyListTool: ServerToolDefinition<z.infer<typeof dependencyL
     return {
       dependencies: manifest.dependencies,
       allowlist: Object.values(DEPENDENCY_ALLOWLIST),
+      builtIns: ["react", "react-dom"],
     };
   },
 };
@@ -175,6 +177,7 @@ export const dependencyAddTool: ServerToolDefinition<z.infer<typeof dependencyAd
       dependencies: [...manifest.dependencies, { name: args.name, version: pinned }],
     };
     writeWorkspaceManifest(workspaceDir, next);
+    invalidateQualityGates(context);
     return { added: true, name: args.name, version: pinned, dependencies: next.dependencies };
   },
 };
@@ -195,6 +198,7 @@ export const dependencyRemoveTool: ServerToolDefinition<z.infer<typeof dependenc
       return { removed: false, dependencies };
     }
     writeWorkspaceManifest(workspaceDir, { ...manifest, dependencies });
+    invalidateQualityGates(context);
     return { removed: true, dependencies };
   },
 };
@@ -204,12 +208,19 @@ export const securityScanTool: ServerToolDefinition<z.infer<typeof securityScanA
   description: "对工作区代码执行确定性静态安全扫描（eval/new Function/child_process/网络/存储/密钥/任意文件访问等）。",
   argsSchema: securityScanArgsSchema,
   resultSchema: securityScanResultSchema,
-  allowedRoles: ["engineer", "reviewer", "security_reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
     const workspaceDir = requireInitializedWorkspace(context);
     const report = scanWorkspace(workspaceDir);
+    context.quality.securityScanPassed = report.status === "pass";
+    context.artifacts.put({
+      kind: "security_report",
+      createdBy: context.roleId,
+      parentAgentRunId: context.parentAgentRunId,
+      value: report,
+    });
     return { status: report.status, findings: report.findings, filesScanned: report.filesScanned };
   },
 };
@@ -226,7 +237,7 @@ export const createCodeSnapshotTool: ServerToolDefinition<z.infer<typeof createC
     const workspaceDir = requireInitializedWorkspace(context);
     const snapshot = await createSnapshot(context.currentAppId || "project", workspaceDir);
     const artifactId = context.artifacts.put({
-      kind: "code_workspace",
+      kind: "code_snapshot",
       createdBy: context.roleId,
       parentAgentRunId: context.parentAgentRunId,
       value: { snapshotId: snapshot.snapshotId, files: snapshot.files, createdAt: snapshot.createdAt },
@@ -246,14 +257,15 @@ export const restoreCodeSnapshotTool: ServerToolDefinition<z.infer<typeof restor
   async execute(args, context) {
     const workspaceDir = requireInitializedWorkspace(context);
     const restored = await restoreSnapshot(args.snapshotId, context.currentAppId || "project", workspaceDir);
+    invalidateQualityGates(context);
     return { restored, snapshotId: args.snapshotId };
   },
 };
 
-/** run_format: real formatting via the esbuild printer (deterministic, offline). */
+/** run_format: syntax-preserving formatting with the pinned server formatter. */
 export const runFormatTool: ServerToolDefinition<z.infer<typeof runFormatArgsSchema>, z.infer<typeof runFormatResultSchema>> = {
   name: "run_format",
-  description: "用系统格式化器（esbuild printer）格式化工作区 TS/TSX 源码，返回实际改写结果。",
+  description: "用系统 Prettier 格式化工作区 TS/TSX 源码，保留类型与注释并返回实际改写结果。",
   argsSchema: runFormatArgsSchema,
   resultSchema: runFormatResultSchema,
   allowedRoles: ["engineer"],
@@ -269,18 +281,18 @@ export const runFormatTool: ServerToolDefinition<z.infer<typeof runFormatArgsSch
       for (const file of files) {
         const { content: before } = safeReadFile(workspaceDir, file.path, 256 * 1024);
         try {
-          const result = await esbuildTransform(before, { loader: file.path.endsWith(".tsx") ? "tsx" : "ts", format: "esm", target: "es2020", jsx: "automatic", logLevel: "silent" });
+          const result = await prettierFormat(before, { parser: "typescript" });
           formatted += 1;
-          if (result.code !== before) {
-            safeWriteFile(workspaceDir, file.path, result.code);
+          if (result !== before) {
+            safeWriteFile(workspaceDir, file.path, result);
             changed += 1;
           }
         } catch (error) {
           throw new WorkspaceError("FORMAT_FAILED", "格式化失败：" + redactHostText(error instanceof Error ? error.message : "未知错误", workspaceDir).slice(0, 300), false);
         }
       }
+      if (changed > 0) invalidateQualityGates(context);
       return { formatted, changed, summary: "已检查 " + formatted + " 个文件，改写 " + changed + " 个。" };
     });
   },
 };
-

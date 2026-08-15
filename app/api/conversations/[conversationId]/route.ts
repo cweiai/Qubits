@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getRepository } from "@/lib/db";
 import { newProjectId, newRequestId, readProjectId } from "@/lib/sandbox/server-session";
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/api-response";
-import { toConversationJson, toMessageJson, toTaskJson } from "@/lib/server/conversation-io";
+import { toApprovalJson, toConversationJson, toMessageJson, toTaskJson } from "@/lib/server/conversation-io";
 import { listMessagesQuerySchema, patchConversationBodySchema } from "@/lib/validation/conversation";
 import { isRunActive, terminateRun } from "@/lib/ai/run-registry";
 
@@ -38,6 +38,7 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
     if (!query.success) throw new ApiError("INVALID_REQUEST", "分页参数不合法", 400);
     const messages = repo.listMessages(conversationId, query.data.before ?? null, query.data.limit);
     const tasks = repo.listTasks(conversationId, 20);
+    const pendingApprovals = tasks.flatMap((task) => repo.listPendingApprovals(task.id).map(toApprovalJson));
 
     return NextResponse.json({
       ok: true,
@@ -45,6 +46,7 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
         conversation: toConversationJson(conversation),
         messages: messages.map(toMessageJson),
         tasks: tasks.map(toTaskJson),
+        pendingApprovals,
         messageCount: repo.countMessages(conversationId),
       },
     });

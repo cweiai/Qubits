@@ -35,7 +35,7 @@ export type PreviewPolicyEvent =
   | { type: "user_requested" }
   | { type: "user_collapsed"; taskId: string | null }
   | { type: "user_expanded" }
-  | { type: "restore_prefs"; saved: PreviewPanelMode | null; hasAppSpec: boolean };
+  | { type: "restore_prefs"; saved: PreviewPanelMode | null };
 
 export const INITIAL_PREVIEW_POLICY: PreviewPolicyState = {
   mode: "expanded",
@@ -95,7 +95,7 @@ export function reducePreviewPolicy(
       return { ...state, mode: "expanded", autoExpandedForTaskId: event.taskId };
     }
     case "restore_prefs": {
-      const mode: PreviewPanelMode = event.saved ?? (event.hasAppSpec ? "expanded" : "expanded");
+      const mode: PreviewPanelMode = event.saved ?? "expanded";
       return { ...state, mode };
     }
   }

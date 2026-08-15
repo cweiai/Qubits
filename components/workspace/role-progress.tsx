@@ -27,6 +27,8 @@ export function RoleProgress() {
   for (const run of task.agentRuns) latestByRole.set(run.roleId, run);
   const rows = [...latestByRole.values()].sort((a, b) => a.timestamp - b.timestamp);
   const hasLeader = rows.some((r) => r.roleId === "team_leader");
+  const activeSummary = rows.find((run) => run.status === "running")?.summary ?? null;
+  const phaseSummary = activeSummary || PHASE_SUMMARIES[task.stage] || PHASE_SUMMARIES.planning;
 
   return (
     <div className="rounded-md border bg-white p-3" data-testid="role-progress">
@@ -44,6 +46,12 @@ export function RoleProgress() {
           </Button>
         ) : null}
       </div>
+      {task.status === "running" || task.status === "pending" ? (
+        <div className="mb-2 flex items-start gap-2 rounded-md bg-sky-50 px-2.5 py-2 text-xs text-sky-800" data-testid="phase-summary" aria-live="polite">
+          <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-sky-600" aria-hidden />
+          <span>{phaseSummary}</span>
+        </div>
+      ) : null}
       {rows.length > 0 ? (
         <ul className="space-y-1">
           {rows.map((run) => (
@@ -63,6 +71,14 @@ export function RoleProgress() {
   );
 }
 
+const PHASE_SUMMARIES: Record<string, string> = {
+  planning: "Mike 正在理解需求并安排最少必要的团队协作；下一步会先由 Emma 整理产品简报。",
+  coding: "Alex 正在把产品简报拆成真实的 React/TypeScript 工作区文件，并逐步实现交互。",
+  validating: "Alex 正在对同一份最新工作区运行格式化、Lint、类型检查、测试、构建和安全扫描。",
+  previewing: "Mike 正在提交已通过工程门禁的预览，并准备完成本次运行。",
+  awaiting_approval: "工作区操作需要你的审批；审批结果会直接反馈给当前 Agent。",
+};
+
 function AgentRowFallback({ task }: { task: TaskView }) {
   void task;
   return null;
@@ -78,7 +94,9 @@ function AgentRow({ run, leader }: { run: AgentRunView; leader: boolean }) {
     >
       <RunStatusIcon status={run.status} />
       <span className="shrink-0 font-medium">{meta?.name ?? roleName(run.roleId)}</span>
-      <span className="truncate text-xs text-muted-foreground">{meta?.title}</span>
+      <span className="min-w-0 truncate text-xs text-muted-foreground" title={run.summary ?? meta?.title}>
+        {run.summary ?? meta?.title}
+      </span>
       <span
         className={cn(
           "shrink-0 text-xs",

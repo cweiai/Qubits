@@ -10,7 +10,6 @@ import { toTaskJson } from "@/lib/server/conversation-io";
 import type { AgentEvent } from "@/lib/contracts/agent-events";
 import { initWorkspace } from "@/lib/workspace/workspace-manager";
 import { createCodeSnapshot, snapshotDirFor } from "@/lib/workspace/snapshot";
-import { readBuildReport, readPreviewBundle } from "@/lib/workspace/builder";
 import { legacyManifestFromJson } from "@/lib/workspace/legacy-convert";
 import { composeAbortSignals, registerRun, unregisterRun } from "@/lib/ai/run-registry";
 import type { PromoteRunInput } from "@/lib/ai/tools/types";
@@ -42,15 +41,10 @@ function parseJsonArray(raw: string | null): unknown[] {
 const ROLE_STAGE: Record<string, string> = {
   team_leader: "planning",
   product_manager: "planning",
-  researcher: "planning",
-  architect: "architecting",
   engineer: "coding",
-  data_scientist: "planning",
-  reviewer: "reviewing",
-  security_reviewer: "reviewing",
 };
 
-const VALIDATING_TOOLS = new Set(["run_lint", "run_typecheck", "run_tests", "run_build", "get_build_errors", "get_test_failures"]);
+const VALIDATING_TOOLS = new Set(["run_lint", "run_typecheck", "run_tests", "run_build", "security_scan", "get_build_errors", "get_test_failures"]);
 
 function withRolePatch(roles: Record<string, unknown>, roleId: string, patch: Record<string, unknown>): string {
   const next = { ...roles, [roleId]: { ...((roles[roleId] as Record<string, unknown>) ?? {}), ...patch } };
@@ -179,24 +173,6 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
       });
       // Promote the snapshot as this conversation's version.
       repo.updateConversationApp(task.conversationId, projectId, { currentSnapshotId: snapshot.snapshotId });
-      repo.insertArtifact({
-        id: "art-" + crypto.randomUUID(),
-        projectId,
-        taskId,
-        kind: "code_workspace",
-        name: input.manifest.name,
-        content: JSON.stringify({ snapshotId: snapshot.snapshotId, files: snapshot.files, version }),
-      });
-      if (input.reviewReport != null) {
-        repo.insertArtifact({
-          id: "art-" + crypto.randomUUID(),
-          projectId,
-          taskId,
-          kind: "review_report",
-          name: input.manifest.name,
-          content: JSON.stringify(input.reviewReport),
-        });
-      }
       return { snapshotId: snapshot.snapshotId, version };
     };
 
@@ -238,6 +214,19 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
             repo.touchConversation(task.conversationId, now);
             break;
           }
+          case "progress_summary": {
+            // Only the bounded summary is persisted; raw reasoning_content never enters task state.
+            rolesJson = withRolePatch(JSON.parse(rolesJson), event.roleId, { summary: event.summary });
+            agentRuns = agentRuns.map((r) => ((r as { agentRunId: string }).agentRunId === event.agentRunId
+              ? { ...(r as object), summary: event.summary }
+              : r));
+            repo.updateTask(task.id, {
+              stage: event.phase,
+              rolesJson,
+              agentRunsJson: JSON.stringify(agentRuns),
+            });
+            break;
+          }
           case "tool_call_started":
             toolEvents = [...toolEvents, { toolCallId: event.toolCallId, agentRunId: event.agentRunId, roleId: event.roleId, toolName: event.toolName, inputSummary: event.inputSummary, status: "running", at: now }];
             repo.updateTask(task.id, { toolEventsJson: JSON.stringify(toolEvents.slice(-200)) });
@@ -248,53 +237,44 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
             if (VALIDATING_TOOLS.has(event.toolName)) {
               repo.updateTask(task.id, { stage: "validating", toolEventsJson: JSON.stringify(toolEvents.slice(-200)) });
             } else {
-              repo.updateTask(task.id, { toolEventsJson: JSON.stringify(toolEvents.slice(-200)) });
+              repo.updateTask(task.id, { stage: ROLE_STAGE[event.roleId] ?? "planning", toolEventsJson: JSON.stringify(toolEvents.slice(-200)) });
             }
             break;
           case "reference_found":
-            toolEvents = [...toolEvents, { toolCallId: "ref:" + event.resultId, roleId: "researcher", toolName: "search_references", status: "success", reference: event, at: now }];
+            toolEvents = [...toolEvents, { toolCallId: "ref:" + event.resultId, roleId: "team_leader", toolName: "search_references", status: "success", reference: event, at: now }];
             repo.updateTask(task.id, { toolEventsJson: JSON.stringify(toolEvents.slice(-200)) });
+            break;
+          case "approval_requested":
+            toolEvents = [...toolEvents, {
+              toolCallId: event.toolCallId,
+              roleId: "team_leader",
+              toolName: event.toolName,
+              status: "running",
+              inputSummary: event.reason,
+              approvalId: event.approvalId,
+              at: now,
+            }];
+            repo.updateTask(task.id, { stage: "awaiting_approval", toolEventsJson: JSON.stringify(toolEvents.slice(-200)) });
             break;
           case "preview_requested":
             repo.updateTask(task.id, { stage: "previewing" });
             break;
           case "preview_ready": {
-            // Sole preview write point: reached only after Mike's render_preview succeeds on a real build.
-            const bundle = readPreviewBundle(workspaceDir);
-            if (!bundle) {
-              throw new Error("preview_ready 但工作区缺少构建产物");
+            // The artifact store has already persisted the real bundle before this event.
+            const artifact = repo.getArtifact(event.previewArtifactId);
+            if (!artifact || artifact.projectId !== projectId || artifact.kind !== "preview_bundle") {
+              throw new Error("preview_ready 引用的预览产物不存在");
             }
-            const artifactId = "art-" + crypto.randomUUID();
-            repo.insertArtifact({
-              id: artifactId,
-              projectId,
-              taskId: task.id,
-              kind: "preview_bundle",
-              name: event.appName,
-              content: bundle.html,
-            });
-            const buildReport = readBuildReport(workspaceDir);
-            if (buildReport) {
-              repo.insertArtifact({
-                id: "art-" + crypto.randomUUID(),
-                projectId,
-                taskId: task.id,
-                kind: "build_report",
-                name: event.appName,
-                content: JSON.stringify(buildReport),
-              });
-            }
-            // Sole preview write point: only this conversation's app state is updated.
             repo.updateConversationApp(task.conversationId, projectId, {
               manifestJson: JSON.stringify(event.manifest),
-              previewBundleId: artifactId,
+              previewBundleId: event.previewArtifactId,
               previewVersion: event.version,
             });
             repo.insertMessage({
               id: "msg-" + crypto.randomUUID(),
               conversationId: task.conversationId,
               role: "system",
-              content: "应用「" + event.appName + "」已通过构建与评审并更新预览（v" + event.version + "）。",
+              content: "应用「" + event.appName + "」已通过构建、测试与安全扫描并更新预览（v" + event.version + "）。",
               status: "completed",
               taskId: task.id,
               metadataJson: JSON.stringify({ kind: "system", taskId: task.id, previewVersion: event.version }),
@@ -320,18 +300,6 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
               content: event.message,
               errorCode: event.code ?? "BUILD_FAILED",
             });
-            // Persist the real (sanitized) build report even for failed attempts so the Logs tab shows it.
-            const failedReport = readBuildReport(workspaceDir);
-            if (failedReport && failedReport.status === "failed") {
-              repo.insertArtifact({
-                id: "art-" + crypto.randomUUID(),
-                projectId,
-                taskId: task.id,
-                kind: "build_report",
-                name: "构建失败",
-                content: JSON.stringify(failedReport),
-              });
-            }
             repo.updateTask(task.id, { status: "failed", stage: "failed", rolesJson, errorCode: event.code ?? "BUILD_FAILED", errorMessage: event.message, agentRunsJson: JSON.stringify(agentRuns) });
             repo.touchConversation(task.conversationId, now);
             break;
@@ -357,6 +325,8 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
           // Failures surface via the error event above; the orchestrator's return value is otherwise unused.
           await runMikeOrchestrator({
             prompt: task.prompt,
+            projectId,
+            taskId: task.id,
             currentManifest,
             currentAppId,
             currentVersion,
@@ -365,7 +335,8 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
             emit: send,
             workspaceDir,
             resumeContext,
-            artifactFile: path.join(process.cwd(), "data", "artifacts", task.id + ".json"),
+            artifactSeed: repo.listArtifactEntries(task.id),
+            persistArtifacts: (entries) => repo.upsertArtifactEntries(task.id, projectId, entries),
             promoteRun,
             dataAdapter: {
               list: (collection) => repo.listRecords(projectId, currentAppId, collection).map((row) => { try { return { id: row.id, ...(JSON.parse(row.dataJson) as Record<string, unknown>) }; } catch { return { id: row.id }; } }),

@@ -2,9 +2,6 @@ import "server-only";
 import path from "node:path";
 import { z } from "zod";
 import type { ServerToolDefinition } from "./types";
-import { ToolExecutionError } from "./types";
-import { appSpecSchema, getAppSpecIssues } from "@/lib/contracts/app-spec";
-import { scanAppSpecForSecurityIssues } from "@/lib/app-spec/security";
 import {
   safeReadFile,
   safeResolveWorkspacePath,
@@ -13,8 +10,8 @@ import {
 } from "@/lib/workspace/paths";
 
 /**
- * Review/security tools (Reviewer-only, read-only): review_changes, security_review,
- * secret_scan, dependency_audit, check_data_isolation (see data.ts). All workspace
+ * Deterministic security evidence tools (Alex-only, read-only): review_changes, secret_scan,
+ * dependency_audit, check_data_isolation (see data.ts). All workspace
  * reads go through the unified jail: lstat-only walks (symlinks fail closed),
  * O_NOFOLLOW reads, per-workspace mutex.
  */
@@ -37,7 +34,7 @@ export const reviewChangesTool: ServerToolDefinition<{ path?: string }, { findin
   description: "审查 workspace 内变更（与最近检查点/初始状态对比的启发式检查）。扫描根目录经过共享 jail（禁止绝对路径、.. 与符号链接）。",
   argsSchema: z.object({ path: z.string().max(300).default(".") }),
   resultSchema: issuesResultSchema,
-  allowedRoles: ["reviewer", "security_reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -63,43 +60,12 @@ export const reviewChangesTool: ServerToolDefinition<{ path?: string }, { findin
   },
 };
 
-export const securityReviewTool: ServerToolDefinition<{ artifactId: string }, { approved: boolean; summary: string; issues: Array<{ code: string; severity: "error" | "warning"; path: string; message: string; repairHint: string }> }> = {
-  name: "security_review",
-  description: "对 AppSpec artifact 做结构/语义/安全审查（服务端校验为准）。",
-  argsSchema: z.object({ artifactId: z.string().min(8).max(64) }),
-  resultSchema: z.object({
-    approved: z.boolean(),
-    summary: z.string().max(300),
-    issues: z.array(z.object({ code: z.string(), severity: z.enum(["error", "warning"]), path: z.string(), message: z.string(), repairHint: z.string() })).max(20),
-  }),
-  allowedRoles: ["reviewer", "security_reviewer"],
-  risk: "low",
-  requiresApproval: false,
-  async execute(args, context) {
-    const raw = context.artifacts.get(args.artifactId);
-    if (raw == null) throw new ToolExecutionError("ARTIFACT_NOT_FOUND", "artifact 不存在", false);
-    const parsed = appSpecSchema.safeParse(raw);
-    if (!parsed.success) {
-      return {
-        approved: false,
-        summary: "AppSpec 结构校验失败",
-        issues: parsed.error.issues.slice(0, 20).map((issue) => ({ code: "INVALID_SCHEMA", severity: "error" as const, path: issue.path.join("."), message: issue.message, repairHint: "修正 schema 结构" })),
-      };
-    }
-    const issues = [
-      ...getAppSpecIssues(parsed.data).map((message) => ({ code: "SEMANTIC_ISSUE", severity: "error" as const, path: "appSpec", message, repairHint: "按提示修正" })),
-      ...scanAppSpecForSecurityIssues(parsed.data).map((issue) => ({ code: issue.code, severity: issue.severity, path: issue.path, message: issue.message, repairHint: issue.repairHint })),
-    ];
-    return { approved: issues.length === 0, summary: issues.length === 0 ? "审查通过" : "发现 " + issues.length + " 个问题", issues: issues.slice(0, 20) };
-  },
-};
-
 export const secretScanTool: ServerToolDefinition<Record<string, never>, { findings: Array<{ severity: "error" | "warning"; file: string; message: string }> }> = {
   name: "secret_scan",
   description: "扫描 workspace 中的密钥/凭据模式。",
   argsSchema: z.object({}).strict(),
   resultSchema: issuesResultSchema,
-  allowedRoles: ["reviewer", "security_reviewer"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
@@ -125,7 +91,7 @@ export const dependencyAuditTool: ServerToolDefinition<Record<string, never>, { 
   description: "对 workspace 依赖清单做受限审计（本地实现：版本范围检查；完整漏洞库需要外部服务）。",
   argsSchema: z.object({}).strict(),
   resultSchema: issuesResultSchema,
-  allowedRoles: ["reviewer", "security_reviewer"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(_args, context) {

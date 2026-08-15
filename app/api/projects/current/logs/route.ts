@@ -83,24 +83,24 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
     }
 
-    const review = repo.getLatestArtifactForConversation(projectId, conversationId, "review_report");
-    if (review) {
+    const security = repo.getLatestArtifactForConversation(projectId, conversationId, "security_report");
+    if (security) {
       try {
-        const parsed = JSON.parse(review.content) as { approved?: boolean; summary?: string; issues?: unknown[] };
-        const issues = Array.isArray(parsed.issues)
-          ? parsed.issues
+        const parsed = JSON.parse(security.content) as { status?: string; findings?: unknown[]; filesScanned?: number };
+        const findings = Array.isArray(parsed.findings)
+          ? parsed.findings
               .slice(0, 10)
-              .map((issue) => {
-                const record = issue as Record<string, unknown>;
-                return "- [" + String(record.code ?? "") + "] " + String(record.message ?? "");
+              .map((finding) => {
+                const record = finding as Record<string, unknown>;
+                return "- [" + String(record.rule ?? "") + "] " + String(record.path ?? "") + ":" + String(record.line ?? "") + " " + String(record.message ?? "");
               })
               .join("\n")
           : "";
         sections.push({
-          kind: "review_report",
-          title: "评审报告",
-          status: parsed.approved ? "approved" : "blocked",
-          content: truncate((parsed.summary ?? "") + (issues ? "\n" + issues : ""), 4000),
+          kind: "security_report",
+          title: "安全扫描",
+          status: parsed.status ?? null,
+          content: truncate("扫描文件：" + String(parsed.filesScanned ?? 0) + (findings ? "\n" + findings : ""), 4000),
         });
       } catch {
         // skip

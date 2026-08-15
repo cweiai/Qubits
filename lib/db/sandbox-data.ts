@@ -9,7 +9,7 @@ import { AppRepository, type RecordRow, type SessionRow } from "./repository";
 
 /**
  * Sandbox data service: all cross-boundary data (session / collection / operation / query / payload)
- * is re-validated server-side; the AppSpec from the frontend or sandbox is never trusted.
+ * is re-validated server-side; the manifest and payload from the sandbox are never trusted.
  */
 
 // ── Limits ──

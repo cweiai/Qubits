@@ -12,8 +12,10 @@ export type ArtifactKind =
   | "code_workspace"
   | "build_report"
   | "test_report"
+  | "security_report"
   | "review_report"
   | "preview_bundle"
+  | "code_snapshot"
   | "data_report"
   | "file"
   | "reference";
@@ -79,12 +81,19 @@ export interface ToolExecutionContext {
   currentAppId: string;
   /** Project's current promoted version (0 when nothing has been promoted yet). */
   currentVersion: number;
+  /** Durable scope used to associate approval requests with the task and project. */
+  projectId?: string | null;
+  taskId?: string | null;
   projectRecords: Array<Record<string, unknown>> | null;
   dataAdapter: DataAdapter | null;
   artifacts: ArtifactStore;
   emit(event: AgentEvent): void;
   childAgentRunner: (request: ChildAgentRequest) => Promise<ChildAgentResult>;
-  reviewerApproved: boolean;
+  quality: {
+    buildPassed: boolean;
+    testsPassed: boolean;
+    securityScanPassed: boolean;
+  };
   previewCommitted: boolean;
   /** Workspace root for this run (jail for file and sandbox tools). */
   workspaceDir: string;
@@ -96,6 +105,12 @@ export interface ToolExecutionContext {
   counters: { toolCalls: number; childAgents: number };
   /** Promotes the workspace into an immutable snapshot + project version (complete_run). */
   promoteRun?: (input: PromoteRunInput) => Promise<PromoteRunResult>;
+}
+
+export function invalidateQualityGates(context: ToolExecutionContext): void {
+  context.quality.buildPassed = false;
+  context.quality.testsPassed = false;
+  context.quality.securityScanPassed = false;
 }
 
 export type ToolRisk = "low" | "medium" | "high" | "critical";

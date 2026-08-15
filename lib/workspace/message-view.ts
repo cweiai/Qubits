@@ -5,7 +5,7 @@ import { ROLE_META } from "@/lib/contracts/agent-events";
 import type { PipelineStage } from "@/lib/contracts/conversation";
 
 /** Server message/task → client view (pure mapping). */
-const KNOWN_ROLES: RoleId[] = ["team_leader", "product_manager", "researcher", "architect", "engineer", "data_scientist", "reviewer", "security_reviewer"];
+const KNOWN_ROLES: RoleId[] = ["team_leader", "product_manager", "engineer"];
 
 export function messageToView(message: MessageJson): ConversationMessage | null {
   const metadata = message.metadata ?? {};
@@ -95,16 +95,14 @@ export interface TaskView {
 
 // ── Tool-card stage grouping (collapsible blocks) ──
 
-export type ToolStage = "planning" | "architecting" | "coding" | "validating" | "reviewing" | "previewing";
+export type ToolStage = "planning" | "coding" | "validating" | "previewing";
 
-export const TOOL_STAGE_ORDER: ToolStage[] = ["planning", "architecting", "coding", "validating", "reviewing", "previewing"];
+export const TOOL_STAGE_ORDER: ToolStage[] = ["planning", "coding", "validating", "previewing"];
 
 export const TOOL_STAGE_LABELS: Record<ToolStage, string> = {
   planning: "规划与任务分配",
-  architecting: "架构设计",
   coding: "编写代码",
   validating: "构建验证",
-  reviewing: "安全评审",
   previewing: "预览提交",
 };
 
@@ -116,18 +114,16 @@ export function activeToolStage(taskStage: string | undefined): ToolStage | null
 }
 
 /** Build/check tools belong to the validating stage (mirrors the server ROLE_STAGE mapping). */
-const VALIDATING_TOOLS = new Set(["run_lint", "run_typecheck", "run_tests", "run_build", "get_build_errors", "get_test_failures"]);
+const VALIDATING_TOOLS = new Set(["run_lint", "run_typecheck", "run_tests", "run_build", "security_scan", "get_build_errors", "get_test_failures"]);
 
 /** Stable stage for a tool event (events never migrate between blocks). */
 export function toolEventStage(event: Pick<ToolEventView, "roleId" | "toolName">): ToolStage {
   if (event.roleId === "team_leader") {
     return event.toolName === "render_preview" || event.toolName === "complete_run" ? "previewing" : "planning";
   }
-  if (event.roleId === "architect") return "architecting";
   if (event.roleId === "engineer") {
     return VALIDATING_TOOLS.has(event.toolName) ? "validating" : "coding";
   }
-  if (event.roleId === "reviewer" || event.roleId === "security_reviewer") return "reviewing";
   return "planning";
 }
 
@@ -212,7 +208,7 @@ function parseToolEvent(raw: unknown): ToolEventView {
   };
 }
 
-const STAGES: PipelineStage[] = ["idle", "planning", "architecting", "coding", "validating", "reviewing", "previewing", "ready", "failed"];
+const STAGES: PipelineStage[] = ["idle", "planning", "coding", "validating", "previewing", "awaiting_approval", "ready", "failed"];
 
 export function taskToView(task: TaskJson): TaskView {
   const rolesRaw = (task.roles ?? {}) as Record<string, unknown>;

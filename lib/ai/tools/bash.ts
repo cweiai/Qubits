@@ -1,6 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import type { ServerToolDefinition } from "./types";
+import { invalidateQualityGates } from "./types";
 import { bashArgsSchema, bashResultSchema } from "./schemas";
 import { WorkspaceError, redactHostText } from "@/lib/workspace/errors";
 import { assertWorkspaceTreeSafe, withWorkspaceLock } from "@/lib/workspace/paths";
@@ -20,7 +21,7 @@ export const bashTool: ServerToolDefinition<z.infer<typeof bashArgsSchema>, z.in
     "在 Docker 容器沙盒内执行一条 shell 命令（bash -lc，无持久 shell 状态；容器只挂载当前工作区，物理隔离，禁网）。用于搜索（grep/find）、查看文件（cat/ls）、检查环境（ps/env）、运行命令（node/npm/git 等）。输出有大小上限并自动脱敏。",
   argsSchema: bashArgsSchema,
   resultSchema: bashResultSchema,
-  allowedRoles: ["engineer", "reviewer"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(args, context) {
@@ -39,6 +40,7 @@ export const bashTool: ServerToolDefinition<z.infer<typeof bashArgsSchema>, z.in
         cwd: context.workspaceDir,
         timeoutMs: args.timeoutMs,
       });
+      invalidateQualityGates(context);
       // A bash command that plants symlinks/special files blocks the whole task.
       assertWorkspaceTreeSafe(context.workspaceDir);
       return {
