@@ -49,3 +49,8 @@ IMPLEMENTATION.md
 /data/workspaces/
 /data/artifacts/
 /data/snapshots/
+
+# one-click deploy (deploy bundles, tunnel logs, provisioned cloudflared binary)
+/data/deployments/
+/data/deploy/
+/bin/cloudflared

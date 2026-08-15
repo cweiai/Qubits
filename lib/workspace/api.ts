@@ -130,6 +130,31 @@ export interface ApprovalJson {
   expiresAt: number;
 }
 
+export interface DeploymentJson {
+  id: string;
+  conversationId: string;
+  status: "starting" | "live" | "stopped" | "expired" | "failed";
+  url: string | null;
+  createdAt: number;
+  expiresAt: number;
+  stoppedAt: number | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export interface DeployRuntimeJson {
+  state: "stopped" | "starting" | "ready" | "error";
+  publicBaseUrl: string | null;
+  localBaseUrl: string | null;
+  tunnel: { state: "disabled" | "starting" | "ready" | "error"; publicBaseUrl: string | null; error: string | null; restartAttempts: number } | null;
+  initError: string | null;
+}
+
+export interface DeployListData {
+  deployments: DeploymentJson[];
+  runtime: DeployRuntimeJson;
+}
+
 export interface ConversationDetail {
   conversation: ConversationSummary;
   messages: MessageJson[];
@@ -191,6 +216,17 @@ export const api = {
     request<{ approvalId: string; status: string }>(`/api/approvals/${encodeURIComponent(approvalId)}`, {
       method: "POST",
       body: JSON.stringify({ decision }),
+    }),
+  listDeployments: (conversationId: string) =>
+    request<DeployListData>(`/api/deployments?conversationId=${encodeURIComponent(conversationId)}`),
+  deployConversation: (conversationId: string) =>
+    request<{ deployment: DeploymentJson; url: string; runtime: DeployRuntimeJson }>("/api/deployments", {
+      method: "POST",
+      body: JSON.stringify({ conversationId }),
+    }),
+  stopDeployment: (deploymentId: string) =>
+    request<{ id: string; status: string }>(`/api/deployments/${encodeURIComponent(deploymentId)}`, {
+      method: "DELETE",
     }),
 };
 

@@ -148,3 +148,23 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals (run_id, status);
 CREATE INDEX IF NOT EXISTS idx_approvals_task ON approvals (task_id, status);
+
+-- One-click public deployments: each row is one containerized deployment of a
+-- conversation's built preview bundle, exposed through the deploy router / tunnel.
+CREATE TABLE IF NOT EXISTS deployments (
+  id                 TEXT PRIMARY KEY,
+  project_id         TEXT NOT NULL,
+  conversation_id    TEXT NOT NULL,
+  status             TEXT NOT NULL DEFAULT 'starting', -- starting | live | stopped | expired | failed
+  session_id         TEXT,
+  container_name     TEXT,
+  port               INTEGER,
+  bundle_artifact_id TEXT,
+  error_code         TEXT,
+  error_message      TEXT,
+  created_at         INTEGER NOT NULL,
+  expires_at         INTEGER NOT NULL,
+  stopped_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_deployments_conversation ON deployments (conversation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments (status);

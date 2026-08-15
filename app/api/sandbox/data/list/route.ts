@@ -1,16 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getRepository } from "@/lib/db";
-import {
-  applyQuery,
-  checkRateLimit,
-  parseRecordRow,
-  parseSessionCollections,
-  requireCollection,
-  requireOperation,
-  resolveSession,
-  validateQuery,
-} from "@/lib/db/sandbox-data";
+import { performListOperation, resolveSession } from "@/lib/db/sandbox-data";
 import { newRequestId, readProjectId, sandboxErrorResponse } from "@/lib/sandbox/server-session";
 
 export const runtime = "nodejs";
@@ -54,25 +45,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const repo = getRepository();
     const projectId = readProjectId(request);
     const session = resolveSession(repo, projectId, sessionId);
-    const collections = parseSessionCollections(session);
-    const collection = requireCollection(collections, collectionName);
-    requireOperation(collection, operation);
-    checkRateLimit(sessionId);
-
-    const query = validateQuery(collection, parsed.data.query);
-    const rows = repo.listRecords(projectId!, session.appId, collection.name)
-      .map(parseRecordRow)
-      .map((row) => ({ id: row.id, ...row.data }));
-    const filtered = applyQuery(
-      rows.map((row) => ({ id: row.id, data: row })),
-      query,
-      collection
-    ).map((row) => row.data);
-
-    if (operation === "count") {
-      return NextResponse.json({ ok: true, data: { count: filtered.length } });
-    }
-    return NextResponse.json({ ok: true, data: { records: filtered } });
+    const result = performListOperation(repo, session, {
+      operation,
+      collection: collectionName,
+      query: parsed.data.query,
+    });
+    return NextResponse.json(result);
   } catch (error) {
     return sandboxErrorResponse(error, requestId);
   }

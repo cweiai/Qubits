@@ -1,12 +1,16 @@
 "use client";
 
-import { Monitor, RotateCw, Smartphone } from "lucide-react";
+import { useState } from "react";
+import { Monitor, Rocket, RotateCw, Smartphone } from "lucide-react";
 import { useWorkspace } from "@/lib/state/workspace-provider";
 import { cn } from "@/lib/utils";
+import { DeployDialog } from "./deploy-dialog";
 
 export function PreviewToolbar() {
   const { state, parsedManifest, setPreviewDevice, refreshPreview } = useWorkspace();
   const device = state.prefs.previewDevice;
+  const [deployOpen, setDeployOpen] = useState(false);
+  const hasPreview = state.previewBundleId != null && parsedManifest?.ok === true;
 
   return (
     <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-white px-3">
@@ -61,6 +65,24 @@ export function PreviewToolbar() {
       >
         <RotateCw className="h-4 w-4" />
       </button>
+      <button
+        type="button"
+        aria-label="一键上线"
+        title={hasPreview ? "一键上线：部署到容器并生成公网临时链接" : "当前对话还没有可上线的应用"}
+        data-testid="deploy-open"
+        disabled={!hasPreview}
+        onClick={() => setDeployOpen(true)}
+        className="flex h-8 items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-2.5 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Rocket className="h-3.5 w-3.5" />
+        一键上线
+      </button>
+      <DeployDialog
+        open={deployOpen}
+        onOpenChange={setDeployOpen}
+        conversationId={state.currentConversationId}
+        hasPreview={hasPreview}
+      />
     </div>
   );
 }

@@ -1,17 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getRepository } from "@/lib/db";
-import {
-  checkRateLimit,
-  parseRecordRow,
-  parseSessionCollections,
-  requireCollection,
-  requireOperation,
-  resolveSession,
-  SandboxError,
-  validateRecordInput,
-} from "@/lib/db/sandbox-data";
-import { newId } from "@/lib/app/records";
+import { performMutateOperation, resolveSession } from "@/lib/db/sandbox-data";
 import { newRequestId, readProjectId, sandboxErrorResponse } from "@/lib/sandbox/server-session";
 
 export const runtime = "nodejs";
@@ -57,45 +47,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const repo = getRepository();
     const projectId = readProjectId(request);
     const session = resolveSession(repo, projectId, sessionId);
-    const collections = parseSessionCollections(session);
-    const collection = requireCollection(collections, collectionName);
-    requireOperation(collection, operation);
-    checkRateLimit(sessionId);
-
-    const scope = { projectId: projectId!, appId: session.appId, collection: collection.name };
-
-    if (operation === "create") {
-      const cleaned = validateRecordInput(collection, parsed.data.input, "create");
-      const record = { id: newId("rec"), ...cleaned };
-      repo.insertRecord({ ...scope, id: record.id, dataJson: JSON.stringify(cleaned) });
-      return NextResponse.json({ ok: true, data: { record } });
-    }
-
-    const id = parsed.data.id;
-    if (!id) {
-      throw new SandboxError("INVALID_REQUEST", "update/delete 必须提供记录 id", 400);
-    }
-
-    if (operation === "update") {
-      const existing = repo.getRecordById(id);
-      if (!existing || existing.projectId !== scope.projectId || existing.appId !== scope.appId || existing.collection !== scope.collection) {
-        throw new SandboxError("RECORD_NOT_FOUND", "记录不存在或不属于当前应用", 404);
-      }
-      const patch = validateRecordInput(collection, parsed.data.patch, "patch");
-      const merged = { ...parseRecordRow(existing).data, ...patch };
-      const updated = repo.updateRecord({ ...scope, id, dataJson: JSON.stringify(merged) });
-      if (!updated) {
-        throw new SandboxError("RECORD_NOT_FOUND", "记录不存在或不属于当前应用", 404);
-      }
-      return NextResponse.json({ ok: true, data: { record: { id, ...merged } } });
-    }
-
-    // delete
-    const deleted = repo.deleteRecord({ ...scope, id });
-    if (!deleted) {
-      throw new SandboxError("RECORD_NOT_FOUND", "记录不存在或不属于当前应用", 404);
-    }
-    return NextResponse.json({ ok: true, data: { id } });
+    const result = performMutateOperation(repo, session, {
+      operation,
+      collection: collectionName,
+      id: parsed.data.id,
+      recordInput: parsed.data.input,
+      patch: parsed.data.patch,
+    });
+    return NextResponse.json(result);
   } catch (error) {
     return sandboxErrorResponse(error, requestId);
   }

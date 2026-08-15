@@ -340,6 +340,90 @@ export function seedInitialRecords(
   return inserted;
 }
 
+// ── Shared operation handlers ──
+// Used by both the sandbox data routes (cookie-scoped preview sessions) and the public
+// deployment data route (deployment-scoped sessions, no project cookie). All validation
+// happens here; callers only resolve the session and pass validated ids/operations.
+
+export function performListOperation(
+  repo: AppRepository,
+  session: SessionRow,
+  input: { operation: "list" | "count"; collection: string; query: unknown }
+): { ok: true; data: unknown } {
+  const collections = parseSessionCollections(session);
+  const collection = requireCollection(collections, input.collection);
+  requireOperation(collection, input.operation);
+  checkRateLimit(session.id);
+
+  const query = validateQuery(collection, input.query);
+  const rows = repo
+    .listRecords(session.projectId, session.appId, collection.name)
+    .map(parseRecordRow)
+    .map((row) => ({ id: row.id, ...row.data }));
+  const filtered = applyQuery(
+    rows.map((row) => ({ id: row.id, data: row })),
+    query,
+    collection
+  ).map((row) => row.data);
+
+  if (input.operation === "count") {
+    return { ok: true, data: { count: filtered.length } };
+  }
+  return { ok: true, data: { records: filtered } };
+}
+
+export function performMutateOperation(
+  repo: AppRepository,
+  session: SessionRow,
+  input: {
+    operation: "create" | "update" | "delete";
+    collection: string;
+    id?: string;
+    recordInput?: unknown;
+    patch?: unknown;
+  }
+): { ok: true; data: unknown } {
+  const collections = parseSessionCollections(session);
+  const collection = requireCollection(collections, input.collection);
+  requireOperation(collection, input.operation);
+  checkRateLimit(session.id);
+
+  const scope = { projectId: session.projectId, appId: session.appId, collection: collection.name };
+
+  if (input.operation === "create") {
+    const cleaned = validateRecordInput(collection, input.recordInput, "create");
+    const record = { id: newId("rec"), ...cleaned };
+    repo.insertRecord({ ...scope, id: record.id, dataJson: JSON.stringify(cleaned) });
+    return { ok: true, data: { record } };
+  }
+
+  const id = input.id;
+  if (!id) {
+    throw new SandboxError("INVALID_REQUEST", "update/delete 必须提供记录 id", 400);
+  }
+
+  if (input.operation === "update") {
+    const existing = repo.getRecordById(id);
+    if (!existing || existing.projectId !== scope.projectId || existing.appId !== scope.appId || existing.collection !== scope.collection) {
+      throw new SandboxError("RECORD_NOT_FOUND", "记录不存在或不属于当前应用", 404);
+    }
+    const patch = validateRecordInput(collection, input.patch, "patch");
+    const merged = { ...parseRecordRow(existing).data, ...patch };
+    const updated = repo.updateRecord({ ...scope, id, dataJson: JSON.stringify(merged) });
+    if (!updated) {
+      throw new SandboxError("RECORD_NOT_FOUND", "记录不存在或不属于当前应用", 404);
+    }
+    return { ok: true, data: { record: { id, ...merged } } };
+  }
+
+  // delete
+  const deleted = repo.deleteRecord({ ...scope, id });
+  if (!deleted) {
+    throw new SandboxError("RECORD_NOT_FOUND", "记录不存在或不属于当前应用", 404);
+  }
+  return { ok: true, data: { id } };
+}
+
 // ── Session-level rate limiting ──
 
 const rateBuckets = new Map<string, number[]>();

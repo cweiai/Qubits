@@ -142,6 +142,24 @@ export interface ApprovalRow {
   resolvedBy: string | null;
 }
 
+export type DeploymentStatus = "starting" | "live" | "stopped" | "expired" | "failed";
+
+export interface DeploymentRow {
+  id: string;
+  projectId: string;
+  conversationId: string;
+  status: DeploymentStatus;
+  sessionId: string | null;
+  containerName: string | null;
+  port: number | null;
+  bundleArtifactId: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: number;
+  expiresAt: number;
+  stoppedAt: number | null;
+}
+
 const SCHEMA_PATH = path.join(process.cwd(), "lib", "db", "schema.sql");
 
 export class AppRepository {
@@ -762,6 +780,7 @@ export class AppRepository {
       this.db.prepare("DELETE FROM conversations WHERE project_id = ?").run(projectId);
       this.db.prepare("DELETE FROM sandbox_sessions WHERE project_id = ?").run(projectId);
       this.db.prepare("DELETE FROM app_records WHERE project_id = ?").run(projectId);
+      this.db.prepare("DELETE FROM deployments WHERE project_id = ?").run(projectId);
       this.db.prepare("DELETE FROM code_snapshots WHERE project_id = ?").run(projectId);
       this.db.prepare("DELETE FROM artifacts WHERE project_id = ?").run(projectId);
       this.db.prepare("DELETE FROM approvals WHERE project_id = ?").run(projectId);
@@ -827,6 +846,140 @@ export class AppRepository {
   deleteExpiredSessions(now: number): number {
     const result = this.db.prepare("DELETE FROM sandbox_sessions WHERE expires_at <= ?").run(now);
     return Number(result.changes ?? 0);
+  }
+
+  deleteSession(id: string): void {
+    this.db.prepare("DELETE FROM sandbox_sessions WHERE id = ?").run(id);
+  }
+
+  // ── Deployments ──
+
+  private mapDeployment(row: Record<string, unknown>): DeploymentRow {
+    return {
+      id: row.id as string,
+      projectId: row.project_id as string,
+      conversationId: row.conversation_id as string,
+      status: (row.status as DeploymentStatus) ?? "starting",
+      sessionId: (row.session_id as string | null) ?? null,
+      containerName: (row.container_name as string | null) ?? null,
+      port: row.port == null ? null : Number(row.port),
+      bundleArtifactId: (row.bundle_artifact_id as string | null) ?? null,
+      errorCode: (row.error_code as string | null) ?? null,
+      errorMessage: (row.error_message as string | null) ?? null,
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+      stoppedAt: row.stopped_at == null ? null : Number(row.stopped_at),
+    };
+  }
+
+  createDeployment(input: {
+    id: string;
+    projectId: string;
+    conversationId: string;
+    status: DeploymentStatus;
+    sessionId: string | null;
+    containerName: string | null;
+    port: number | null;
+    bundleArtifactId: string | null;
+    expiresAt: number;
+  }): DeploymentRow {
+    const now = Date.now();
+    this.db
+      .prepare(
+        "INSERT INTO deployments (id, project_id, conversation_id, status, session_id, container_name, port, bundle_artifact_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(
+        input.id,
+        input.projectId,
+        input.conversationId,
+        input.status,
+        input.sessionId,
+        input.containerName,
+        input.port,
+        input.bundleArtifactId,
+        now,
+        input.expiresAt
+      );
+    return this.getDeployment(input.id)!;
+  }
+
+  getDeployment(id: string): DeploymentRow | null {
+    const row = this.db.prepare("SELECT * FROM deployments WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+    return this.mapDeployment(row);
+  }
+
+  listDeploymentsByConversation(conversationId: string): DeploymentRow[] {
+    const rows = this.db
+      .prepare("SELECT * FROM deployments WHERE conversation_id = ? ORDER BY created_at DESC, id DESC")
+      .all(conversationId) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapDeployment(row));
+  }
+
+  listDeploymentsByStatus(status: DeploymentStatus): DeploymentRow[] {
+    const rows = this.db.prepare("SELECT * FROM deployments WHERE status = ?").all(status) as Array<
+      Record<string, unknown>
+    >;
+    return rows.map((row) => this.mapDeployment(row));
+  }
+
+  countLiveDeployments(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM deployments WHERE status = 'live'").get() as
+      | { n: number | bigint }
+      | undefined;
+    return Number(row?.n ?? 0);
+  }
+
+  updateDeployment(
+    id: string,
+    patch: {
+      status?: DeploymentStatus;
+      sessionId?: string | null;
+      containerName?: string | null;
+      port?: number | null;
+      errorCode?: string | null;
+      errorMessage?: string | null;
+      expiresAt?: number;
+      stoppedAt?: number | null;
+    }
+  ): void {
+    const row = this.getDeployment(id);
+    if (!row) return;
+    const next = { ...row, ...patch };
+    this.db
+      .prepare(
+        "UPDATE deployments SET status = ?, session_id = ?, container_name = ?, port = ?, error_code = ?, error_message = ?, expires_at = ?, stopped_at = ? WHERE id = ?"
+      )
+      .run(
+        next.status,
+        next.sessionId,
+        next.containerName,
+        next.port,
+        next.errorCode,
+        next.errorMessage,
+        next.expiresAt,
+        next.stoppedAt,
+        id
+      );
+  }
+
+  /** Mark every still-live deployment of a conversation (except `exceptId`) as stopped. */
+  stopOtherLiveDeployments(conversationId: string, exceptId: string): string[] {
+    const rows = this.db
+      .prepare("SELECT * FROM deployments WHERE conversation_id = ? AND status = 'live' AND id != ?")
+      .all(conversationId, exceptId) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      this.db
+        .prepare("UPDATE deployments SET status = 'stopped', stopped_at = ? WHERE id = ?")
+        .run(Date.now(), row.id as string);
+    }
+    return rows.map((row) => row.id as string);
+  }
+
+  deleteDeploymentsByProject(projectId: string): void {
+    this.db.prepare("DELETE FROM deployments WHERE project_id = ?").run(projectId);
   }
 
   // ── Business records ──
