@@ -114,6 +114,7 @@ export const delegateToAgentTool: ServerToolDefinition<z.infer<typeof delegateTo
       artifactId: result.artifactId,
       summary: result.summary.slice(0, 300),
       issues: result.issues.slice(0, 10),
+      errorCode: result.errorCode ?? null,
       relatedArtifacts,
     };
   },

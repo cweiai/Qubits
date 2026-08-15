@@ -1,7 +1,8 @@
 import "server-only";
+import { existsSync } from "node:fs";
 import { z } from "zod";
 import { transform as esbuildTransform } from "esbuild";
-import { getManifestIssues } from "@/lib/contracts/manifest";
+import { getManifestIssues, MANIFEST_FILE_NAME } from "@/lib/contracts/manifest";
 import type { ServerToolDefinition, ToolExecutionContext } from "./types";
 import {
   createCodeSnapshotArgsSchema,
@@ -38,7 +39,7 @@ import { DEPENDENCY_ALLOWLIST, assertDependencyAvailable, getDependencyVersion }
 import { scanWorkspace } from "@/lib/workspace/security-scan";
 import { createCodeSnapshot as createSnapshot, restoreCodeSnapshot as restoreSnapshot } from "@/lib/workspace/snapshot";
 import { WorkspaceError, redactHostText } from "@/lib/workspace/errors";
-import { assertWorkspaceTreeSafe, safeReadFile, safeWriteFile, withWorkspaceLock } from "@/lib/workspace/paths";
+import { assertWorkspaceTreeSafe, safeReadFile, safeResolveWorkspacePath, safeWriteFile, withWorkspaceLock } from "@/lib/workspace/paths";
 
 /**
  * Workspace tools: the only way AI creates/modifies real application code.
@@ -76,20 +77,26 @@ export const workspaceInitTool: ServerToolDefinition<z.infer<typeof workspaceIni
 
 export const workspaceGetManifestTool: ServerToolDefinition<z.infer<typeof workspaceGetManifestArgsSchema>, z.infer<typeof workspaceGetManifestResultSchema>> = {
   name: "workspace_get_manifest",
-  description: "读取并校验当前工作区的 qubits.manifest.json（应用信息、数据集合、权限与构建入口）。",
+  description: "读取并校验当前工作区的 qubits.manifest.json。新工作区尚未创建 manifest 属正常：返回 { exists: false }，而不是错误（构建/评审阶段才强制要求 manifest 存在且有效）。",
   argsSchema: workspaceGetManifestArgsSchema,
   resultSchema: workspaceGetManifestResultSchema,
-  allowedRoles: ["engineer", "architect", "reviewer", "team_leader", "product_manager", "security_reviewer"],
+  allowedRoles: ["engineer", "reviewer", "security_reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(_args, context) {
     const workspaceDir = requireInitializedWorkspace(context);
+    const manifestPath = safeResolveWorkspacePath(workspaceDir, MANIFEST_FILE_NAME).resolved;
+    if (!existsSync(manifestPath)) {
+      // Normal initial state for a fresh skeleton workspace — NOT an error.
+      return { exists: false };
+    }
     const manifest = readWorkspaceManifest(workspaceDir);
     const issues = getManifestIssues(manifest);
     if (issues.length > 0) {
       throw new WorkspaceError("INVALID_MANIFEST", "manifest 语义校验失败：" + issues.slice(0, 3).join("；"), false);
     }
     return {
+      exists: true,
       name: manifest.name,
       description: manifest.description,
       main: manifest.main,
@@ -109,7 +116,7 @@ export const workspaceListFilesTool: ServerToolDefinition<z.infer<typeof workspa
   description: "列出工作区文件树（标记系统维护文件；只返回工作区相对路径）。",
   argsSchema: workspaceListFilesArgsSchema,
   resultSchema: workspaceListFilesResultSchema,
-  allowedRoles: ["engineer", "architect", "reviewer", "team_leader"],
+  allowedRoles: ["engineer", "reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -212,7 +219,7 @@ export const createCodeSnapshotTool: ServerToolDefinition<z.infer<typeof createC
   description: "为当前工作区创建不可变代码快照（文件清单 + 内容哈希），并存入产物。",
   argsSchema: createCodeSnapshotArgsSchema,
   resultSchema: createCodeSnapshotResultSchema,
-  allowedRoles: ["engineer", "team_leader"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(_args, context) {
@@ -233,7 +240,7 @@ export const restoreCodeSnapshotTool: ServerToolDefinition<z.infer<typeof restor
   description: "把不可变代码快照恢复到当前工作区（只覆盖工作区文件，不动系统配置）。",
   argsSchema: restoreCodeSnapshotArgsSchema,
   resultSchema: restoreCodeSnapshotResultSchema,
-  allowedRoles: ["engineer", "team_leader"],
+  allowedRoles: ["engineer"],
   risk: "medium",
   requiresApproval: false,
   async execute(args, context) {

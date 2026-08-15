@@ -14,7 +14,7 @@ export const createMigrationPlanTool: ServerToolDefinition<Record<string, never>
   description: "生成数据库迁移计划（未配置迁移服务时 NOT_CONFIGURED）。",
   argsSchema: z.object({}).strict(),
   resultSchema: migrationPlanResultSchema,
-  allowedRoles: ["team_leader"],
+  allowedRoles: [],
   risk: "high",
   requiresApproval: false,
   async execute(_args, _context) {
@@ -29,7 +29,7 @@ export const runMigrationTool: ServerToolDefinition<{ planId: string }, { availa
   description: "执行已批准的迁移计划（需要审批；未配置时 NOT_CONFIGURED）。",
   argsSchema: z.object({ planId: z.string().min(1).max(64) }),
   resultSchema: migrationPlanResultSchema,
-  allowedRoles: ["team_leader"],
+  allowedRoles: [],
   risk: "critical",
   requiresApproval: true,
   async execute(_args, _context) {
@@ -44,7 +44,7 @@ export const publishPreviewTool: ServerToolDefinition<Record<string, never>, { a
   description: "发布预览（需要审批；未配置部署平台时 NOT_CONFIGURED）。",
   argsSchema: z.object({}).strict(),
   resultSchema: publishResultSchema,
-  allowedRoles: ["team_leader"],
+  allowedRoles: [],
   risk: "critical",
   requiresApproval: true,
   async execute(_args, _context) {
@@ -59,7 +59,7 @@ export const createShareLinkTool: ServerToolDefinition<Record<string, never>, { 
   description: "创建分享链接（未配置时 NOT_CONFIGURED）。",
   argsSchema: z.object({}).strict(),
   resultSchema: notConfiguredResultSchema,
-  allowedRoles: ["team_leader"],
+  allowedRoles: [],
   risk: "low",
   requiresApproval: false,
   async execute() {
@@ -72,7 +72,7 @@ export const rollbackReleaseTool: ServerToolDefinition<Record<string, never>, { 
   description: "回滚发布（需要审批；未配置时 NOT_CONFIGURED）。",
   argsSchema: z.object({}).strict(),
   resultSchema: publishResultSchema,
-  allowedRoles: ["team_leader"],
+  allowedRoles: [],
   risk: "critical",
   requiresApproval: true,
   async execute() {

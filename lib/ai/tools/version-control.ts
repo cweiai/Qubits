@@ -50,7 +50,7 @@ export const createCheckpointTool: ServerToolDefinition<{ name: string }, { chec
   description: "对当前 run 的 workspace 打快照（可 restore；跳过符号链接与特殊文件）。",
   argsSchema: z.object({ name: z.string().min(1).max(120) }),
   resultSchema: z.object({ checkpointId: z.string(), name: z.string(), files: z.number().int() }),
-  allowedRoles: ["engineer", "team_leader"],
+  allowedRoles: ["engineer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -69,7 +69,7 @@ export const restoreCheckpointTool: ServerToolDefinition<{ checkpointId: string 
   description: "恢复 workspace 快照（破坏性，需要审批；恢复后清除安全阻断标记）。",
   argsSchema: z.object({ checkpointId: z.string().min(4).max(64) }),
   resultSchema: z.object({ restored: z.literal(true), checkpointId: z.string() }),
-  allowedRoles: ["engineer", "team_leader"],
+  allowedRoles: ["engineer"],
   risk: "critical",
   requiresApproval: true,
   async execute(args, context) {

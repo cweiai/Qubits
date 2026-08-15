@@ -89,8 +89,7 @@ describe("工作区初始化（系统骨架，无模板）", () => {
     expect(readFileSync(path.join(dir, "src", "custom.tsx"), "utf8")).toContain("marker");
   });
 
-  it.skipIf(!dockerAvailable())("骨架 + 自写应用通过 lint、typecheck、tests、build（真实 Docker 容器内执行），并产生真实 preview bundle", async () => {
-    const dir = makeWorkspace();
+  it.skipIf(!dockerAvailable())("骨架 + 自写应用通过 lint、typecheck、tests、build（真实 Docker 容器内执行），并产生真实 preview bundle", async () => {    const dir = makeWorkspace();
     initWorkspace(dir, { taskId: "task-000000000002" });
     writeFixtureManifest(dir);
     writeFixtureApp(dir);
@@ -115,6 +114,16 @@ describe("工作区初始化（系统骨架，无模板）", () => {
     expect(readFileSync(path.join(dir, "dist", "index.html"), "utf8")).toContain("qubits-root");
     expect(JSON.parse(readFileSync(path.join(dir, "dist", "build-report.json"), "utf8")).status).toBe("success");
   }, 300000);
+
+  it("Engineer 未创建 manifest 时 build 失败关闭（INVALID_MANIFEST，严格要求存在）", async () => {
+    const dir = makeWorkspace();
+    initWorkspace(dir, { taskId: "task-000000000007" });
+    // Skeleton-only: no qubits.manifest.json — build must fail, never fabricate one.
+    const result = await buildApp(dir);
+    expect(result.report.status).toBe("failed");
+    expect(result.report.errorCode).toBe("INVALID_MANIFEST");
+    expect(result.bundle).toBeNull();
+  });
 
   it("静态扫描阻断 eval / fetch / localStorage（SECURITY_BLOCKED）", async () => {
     const dir = makeWorkspace();

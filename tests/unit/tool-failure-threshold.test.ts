@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { runToolCallingAgent, readMaxToolFailures, ToolLoopError } from "@/lib/ai/tool-loop";
@@ -14,13 +15,14 @@ import { makeTaskManifest } from "./fixtures";
  * The scripted fake provider replaces only the model, not tool execution, the threshold, or events.
  */
 
-const BAD_ARTIFACT = "art-nonexistent-000000000001";
+const FAIL_WORKSPACE = path.join(tmpdir(), "qubits-fail-test");
 
 function makeContext(events: AgentEvent[]): ToolExecutionContext {
+  mkdirSync(FAIL_WORKSPACE, { recursive: true });
   return {
     runId: "run-fail",
     parentAgentRunId: "agent-mike-000000000001",
-    roleId: "architect",
+    roleId: "engineer",
     depth: 1,
     signal: new AbortController().signal,
     currentManifest: makeTaskManifest(),
@@ -33,7 +35,7 @@ function makeContext(events: AgentEvent[]): ToolExecutionContext {
     childAgentRunner: async () => ({ status: "completed", artifactId: null, summary: "ok", issues: [] }),
     reviewerApproved: false,
     previewCommitted: false,
-    workspaceDir: path.join(tmpdir(), "qubits-fail-test"),
+    workspaceDir: FAIL_WORKSPACE,
     workspaceReady: true,
     sandbox: null,
     approvedTools: new Set<string>(),
@@ -72,11 +74,11 @@ function blueprintJson(): string {
   });
 }
 
-/** Every get_artifact call targets a missing artifact, so the real executor returns ARTIFACT_NOT_FOUND. */
+/** Every fs_read call targets a missing file, so the real executor returns NOT_FOUND. */
 function failingProvider(seen: ChatMessage[][]): AIProvider {
   const turn = (): AgentTurnResponse => ({
     content: null,
-    toolCalls: [{ id: "tc-fail-" + Math.random().toString(36).slice(2, 6), name: "get_artifact", rawArguments: JSON.stringify({ artifactId: BAD_ARTIFACT }) }],
+    toolCalls: [{ id: "tc-fail-" + Math.random().toString(36).slice(2, 6), name: "fs_read", rawArguments: JSON.stringify({ path: "missing-file.txt", maxBytes: 100 }) }],
     reasoningContent: null,
   });
   return {
@@ -99,7 +101,7 @@ describe("工具失败阈值", () => {
     const context = makeContext(events);
     await expect(
       runToolCallingAgent({
-        roleId: "architect",
+        roleId: "engineer",
         agentRunId: "agent-test-000000000001",
         systemPrompt: "测试",
         taskPrompt: "校验一个不存在的 artifact",
@@ -115,7 +117,7 @@ describe("工具失败阈值", () => {
     expect(correction).toBeGreaterThan(0);
     const toolMsg = second.find((m) => m.role === "tool");
     expect(toolMsg).toBeTruthy();
-    expect((toolMsg as { content: string }).content).toContain("ARTIFACT_NOT_FOUND");
+    expect((toolMsg as { content: string }).content).toContain("NOT_FOUND");
     // Every failure emits a tool_result with ok:false.
     expect(events.filter((e) => e.type === "tool_result" && e.ok === false).length).toBeGreaterThanOrEqual(3);
     // Stopping emits an error event.
@@ -144,7 +146,7 @@ describe("工具失败阈值", () => {
         seen.push(input.messages);
         calls += 1;
         if (calls === 1) {
-          return { content: null, toolCalls: [{ id: "tc-x", name: "get_artifact", rawArguments: JSON.stringify({ artifactId: BAD_ARTIFACT }) }], reasoningContent: null };
+          return { content: null, toolCalls: [{ id: "tc-x", name: "fs_read", rawArguments: JSON.stringify({ path: "missing-file.txt", maxBytes: 100 }) }], reasoningContent: null };
         }
         // Success path: inspect_current_app (real execution succeeds).
         if (calls === 2) {
@@ -154,7 +156,7 @@ describe("工具失败阈值", () => {
       },
     };
     const result = await runToolCallingAgent({
-      roleId: "architect",
+      roleId: "engineer",
       agentRunId: "agent-test-000000000002",
       systemPrompt: "测试",
       taskPrompt: "先失败后成功",

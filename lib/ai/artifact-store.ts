@@ -16,6 +16,8 @@ export interface StoredArtifactEntry {
 
 export class ArtifactStore {
   private readonly entries = new Map<string, { ref: ArtifactRef; value: unknown }>();
+  /** runId + kind + canonical content → existing artifact id (idempotent dedup). */
+  private readonly dedup = new Map<string, string>();
   private readonly id: string;
   private readonly persist: ((entries: StoredArtifactEntry[]) => void) | null;
 
@@ -26,9 +28,35 @@ export class ArtifactStore {
       for (const entry of seed) {
         if (entry && entry.ref && typeof entry.ref.id === "string") {
           this.entries.set(entry.ref.id, { ref: entry.ref, value: entry.value });
+          this.rememberDedup(entry.ref.id, entry.ref.kind, entry.value);
         }
       }
     }
+  }
+
+  /** Canonical serialization: object keys sorted recursively, so equal content dedups. */
+  private static canonicalize(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map((item) => ArtifactStore.canonicalize(item));
+    if (value !== null && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(value as object).sort()) {
+        out[key] = ArtifactStore.canonicalize((value as Record<string, unknown>)[key]);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  private dedupKey(kind: ArtifactKind, value: unknown): string {
+    try {
+      return kind + ":" + JSON.stringify(ArtifactStore.canonicalize(value));
+    } catch {
+      return kind + ":" + String(value);
+    }
+  }
+
+  private rememberDedup(id: string, kind: ArtifactKind, value: unknown): void {
+    this.dedup.set(this.dedupKey(kind, value), id);
   }
 
   /** Export all entries (persisted across attempts). */
@@ -52,6 +80,14 @@ export class ArtifactStore {
     if (size > MAX_ARTIFACT_BYTES) {
       throw new ArtifactStoreError("ARTIFACT_TOO_LARGE", "产物超过大小上限");
     }
+    // Idempotent dedup: identical runId + kind + canonical content returns the SAME id
+    // (never a second copy), so a child re-emitting the same deliverable is a no-op.
+    const key = this.dedupKey(input.kind, input.value);
+    const existingId = this.dedup.get(key);
+    if (existingId) {
+      const existing = this.entries.get(existingId);
+      if (existing) return existing.ref;
+    }
     const id = "art-" + randomUUID();
     const ref: ArtifactRef = {
       id,
@@ -62,6 +98,7 @@ export class ArtifactStore {
       size,
     };
     this.entries.set(id, { ref, value: input.value });
+    this.rememberDedup(id, input.kind, input.value);
     try {
       this.persist?.(this.exportEntries());
     } catch {

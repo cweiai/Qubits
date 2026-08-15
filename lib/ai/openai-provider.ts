@@ -2,11 +2,32 @@ import "server-only";
 import type { AIProvider, AgentTurnResponse, GenerateWithToolsInput } from "./provider";
 
 /**
- * OpenAI provider: calls chat/completions (JSON mode) directly, without the AI SDK.
- * Reads OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL server-side, never exposed to the client.
+ * OpenAI-compatible provider: calls chat/completions (JSON mode) directly, without the
+ * AI SDK. Reads OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL server-side, never
+ * exposed to the client.
+ *
+ * Stable error contract:
+ * - PROVIDER_TIMEOUT        — our own request deadline fired (no HTTP response)
+ * - PROVIDER_NETWORK_ERROR  — fetch TypeError / ECONNRESET / ENOTFOUND / ETIMEDOUT …
+ * - PROVIDER_RATE_LIMIT     — HTTP 429 (or 408)
+ * - PROVIDER_AUTH_ERROR     — HTTP 401 / 403
+ * - PROVIDER_BAD_REQUEST    — HTTP 400 / protocol errors
+ * - PROVIDER_SERVER_ERROR   — HTTP 5xx
+ * Retry policy: network errors + 408/429/5xx are retried at most twice with exponential
+ * backoff + jitter; 400/401/403 and protocol errors never retry; user aborts never retry.
+ * Error messages never contain the API key, Authorization header or request body.
  */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
+
+/** Per-request deadline (env-overridable for tests; default 90s). */
+function providerTimeoutMs(): number {
+  const parsed = Number.parseInt(process.env.QUIBITS_PROVIDER_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(parsed) && parsed >= 50 ? parsed : 90_000;
+}
+
+const MAX_RETRIES = 2;
+const RETRY_BASE_MS = 600;
 
 function openAIConfig() {
   return {
@@ -16,36 +37,77 @@ function openAIConfig() {
   };
 }
 
-async function toProviderError(response: Response): Promise<Error> {
+/** Strip credential-looking values from provider error text (log hygiene, not security). */
+function sanitizeErrorText(text: string): string {
+  return text
+    .replace(/(sk-[A-Za-z0-9_-]{8,})/g, "***")
+    .replace(/(Bearer\s+)[A-Za-z0-9._-]{8,}/gi, "$1***")
+    .replace(/(api[_-]?key[=:]\s*)[^\s"']{4,}/gi, "$1***")
+    .slice(0, 300);
+}
+
+/** Provider-side errors carry stable codes that must survive to the task error. */
+export class ProviderError extends Error {
+  readonly code: string;
+  /** Sanitized OS-level cause code, e.g. ECONNRESET / ENOTFOUND / ETIMEDOUT. */
+  readonly causeCode: string | null;
+  constructor(code: string, message: string, causeCode: string | null = null) {
+    super(sanitizeErrorText(message));
+    this.name = "ProviderError";
+    this.code = code;
+    this.causeCode = causeCode;
+  }
+}
+
+export class ToolMessageProtocolError extends Error {
+  readonly code = "INVALID_TOOL_MESSAGE_SEQUENCE";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ToolMessageProtocolError";
+  }
+}
+
+function networkCauseCodeOf(error: unknown): string | null {
+  if (error instanceof Error && (error as NodeJS.ErrnoException).code) {
+    return String((error as NodeJS.ErrnoException).code).slice(0, 40);
+  }
+  // undici wraps the OS error in cause.
+  const cause = (error as { cause?: unknown })?.cause;
+  if (cause instanceof Error && (cause as NodeJS.ErrnoException).code) {
+    return String((cause as NodeJS.ErrnoException).code).slice(0, 40);
+  }
+  return null;
+}
+
+function mapHttpStatus(status: number, detail: string): ProviderError {
+  if (status === 401 || status === 403) {
+    return new ProviderError("PROVIDER_AUTH_ERROR", "模型服务鉴权失败（" + status + "）：请检查服务端 OPENAI_API_KEY。" + detail, null);
+  }
+  if (status === 429) {
+    return new ProviderError("PROVIDER_RATE_LIMIT", "模型服务请求受限（429）：额度不足或请求过于频繁，请稍后重试。" + detail, null);
+  }
+  if (status === 408) {
+    return new ProviderError("PROVIDER_SERVER_ERROR", "模型服务响应超时（408）。" + detail, null);
+  }
+  if (status >= 500) {
+    return new ProviderError("PROVIDER_SERVER_ERROR", "模型服务内部错误（" + status + "）。" + detail, null);
+  }
+  return new ProviderError("PROVIDER_BAD_REQUEST", "模型服务拒绝了请求（" + status + "）。" + detail, null);
+}
+
+async function readErrorDetail(response: Response): Promise<string> {
   let detail = "";
   try {
     const body: unknown = await response.json();
     if (typeof body === "object" && body !== null) {
       const err = (body as { error?: { message?: unknown } }).error;
-      if (err && typeof err.message === "string") detail = err.message;
+      if (err && typeof err.message === "string") detail = "：" + err.message;
     }
   } catch {
     // ignore failure to parse the error body
   }
-  if (response.status === 401) {
-    return new Error("OpenAI 鉴权失败（401）：请检查服务端环境变量 OPENAI_API_KEY 是否有效。");
-  }
-  if (response.status === 429) {
-    return new Error("OpenAI 请求受限（429）：额度不足或请求过于频繁，请稍后重试。");
-  }
-  return new Error(
-    `OpenAI 请求失败（${response.status}）${detail ? `：${detail.slice(0, 200)}` : ""}`
-  );
-}
-
-/** Provider-side timeout must surface as PROVIDER_TIMEOUT — never as a generic aborted message. */
-export class ProviderError extends Error {
-  readonly code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "ProviderError";
-    this.code = code;
-  }
+  return sanitizeErrorText(detail);
 }
 
 /** Map an internal provider timeout vs an external client abort to distinct stable errors. */
@@ -56,18 +118,13 @@ function mapAbortError(error: unknown, signal?: AbortSignal): Error {
     return error instanceof Error ? error : new Error("请求已取消");
   }
   if (error instanceof Error && error.name === "AbortError") {
-    return new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（90 秒），请稍后重试。");
+    return new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（" + Math.round(providerTimeoutMs() / 1000) + " 秒），请稍后重试。");
   }
   return error instanceof Error ? error : new Error("模型服务请求失败");
 }
 
-export class ToolMessageProtocolError extends Error {
-  readonly code = "INVALID_TOOL_MESSAGE_SEQUENCE";
-
-  constructor(message: string) {
-    super(message);
-    this.name = "ToolMessageProtocolError";
-  }
+function retryDelayMs(attempt: number): number {
+  return RETRY_BASE_MS * 2 ** attempt + Math.floor(Math.random() * 200);
 }
 
 /**
@@ -227,27 +284,48 @@ export function parseProviderToolCalls(raw: unknown): AgentTurnResponse["toolCal
 }
 
 /** Real tool calling: native tools/tool_calls protocol (not mixed with response_format json_object). */
-async function callChatWithTools(input: GenerateWithToolsInput): Promise<AgentTurnResponse> {
+/** One chat/completions attempt. Returns parsed turn; throws ProviderError/AbortError/protocol errors. */
+async function attemptChatWithTools(input: GenerateWithToolsInput): Promise<AgentTurnResponse> {
   const { baseUrl, apiKey, model } = openAIConfig();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 90_000);
+  const timer = setTimeout(() => controller.abort(), providerTimeoutMs());
   const onOuterAbort = () => controller.abort();
   input.signal?.addEventListener("abort", onOuterAbort);
   try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        max_tokens: 4096,
-        tools: input.tools.map((tool) => ({ type: "function", function: tool })),
-        tool_choice: "auto",
-        messages: buildChatMessages(input.system, input.messages, toolMessageCompatEnabled()),
-      }),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw await toProviderError(response);
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          temperature: 0.2,
+          max_tokens: 4096,
+          tools: input.tools.map((tool) => ({ type: "function", function: tool })),
+          tool_choice: "auto",
+          messages: buildChatMessages(input.system, input.messages, toolMessageCompatEnabled()),
+        }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      // fetch TypeError (connection reset, DNS failure, timeout via abort)…
+      if (input.signal?.aborted) throw error; // user abort: no retry, CLIENT_ABORTED upstream
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（" + Math.round(providerTimeoutMs() / 1000) + " 秒）。");
+      }
+      if (error instanceof TypeError) {
+        const causeCode = networkCauseCodeOf(error);
+        throw new ProviderError(
+          "PROVIDER_NETWORK_ERROR",
+          "模型服务网络错误" + (causeCode ? "（" + causeCode + "）" : "") + "：无法连接模型服务，请检查网络后重试。",
+          causeCode
+        );
+      }
+      throw error;
+    }
+    if (!response.ok) {
+      throw mapHttpStatus(response.status, await readErrorDetail(response));
+    }
     const data = (await response.json()) as {
       choices?: Array<{
         message?: {
@@ -258,7 +336,7 @@ async function callChatWithTools(input: GenerateWithToolsInput): Promise<AgentTu
       }>;
     };
     const message = data.choices?.[0]?.message;
-    if (!message) throw new Error("模型服务未返回结果");
+    if (!message) throw new ProviderError("PROVIDER_SERVER_ERROR", "模型服务未返回结果。");
     return {
       content: message.content ?? null,
       reasoningContent: message.reasoning_content ?? null,
@@ -270,6 +348,32 @@ async function callChatWithTools(input: GenerateWithToolsInput): Promise<AgentTu
     clearTimeout(timer);
     input.signal?.removeEventListener("abort", onOuterAbort);
   }
+}
+
+function isRetryableProviderError(error: unknown): boolean {
+  if (!(error instanceof ProviderError)) return false;
+  return (
+    error.code === "PROVIDER_NETWORK_ERROR" ||
+    error.code === "PROVIDER_RATE_LIMIT" ||
+    error.code === "PROVIDER_SERVER_ERROR"
+  );
+}
+
+async function callChatWithTools(input: GenerateWithToolsInput): Promise<AgentTurnResponse> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await attemptChatWithTools(input);
+    } catch (error) {
+      lastError = error;
+      // No retry: user aborts, auth/bad-request/protocol errors, and non-provider errors.
+      if (input.signal?.aborted) throw error;
+      if (!isRetryableProviderError(error)) throw error;
+      if (attempt === MAX_RETRIES) throw error;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new ProviderError("PROVIDER_SERVER_ERROR", "模型服务请求失败");
 }
 
 export const openaiProvider: AIProvider = {

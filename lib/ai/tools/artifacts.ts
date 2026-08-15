@@ -1,31 +1,46 @@
 import "server-only";
-import type { ArtifactKind, ServerToolDefinition } from "./types";
+import { z } from "zod";
+import type { ServerToolDefinition } from "./types";
 import { ToolExecutionError } from "./types";
 import {
   compareArtifactsArgsSchema, compareArtifactsResultSchema, createArtifactArgsSchema,
   createArtifactResultSchema, getArtifactArgsSchema, getArtifactResultSchema,
 } from "./schemas";
 
-export const createArtifactTool: ServerToolDefinition<{ kind: ArtifactKind; name: string; content?: unknown }, { artifactId: string }> = {
+/**
+ * Artifact tools. FINAL deliverables (product_brief / research_report / app_blueprint /
+ * code_workspace / build_report / test_report / review_report / preview_bundle /
+ * data_report) are NEVER saved through create_artifact — the orchestrator persists
+ * them exactly once after the child agent's finalSchema-validated structured output.
+ * create_artifact exists only for intermediate "file" attachments and is Mike-only.
+ */
+
+export const createArtifactTool: ServerToolDefinition<z.infer<typeof createArtifactArgsSchema>, z.infer<typeof createArtifactResultSchema>> = {
   name: "create_artifact",
-  description: "把结构化内容保存为当前 run 的 artifact。",
+  description:
+    "仅用于保存中间附件（kind 只能是 file，内容为纯文本）。最终交付物（product_brief/app_blueprint/code_workspace/review_report 等）由系统在子 Agent 输出通过校验后自动保存，严禁用本工具保存它们。",
   argsSchema: createArtifactArgsSchema,
   resultSchema: createArtifactResultSchema,
-  allowedRoles: ["team_leader", "architect", "engineer", "data_scientist"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
-    const ref = context.artifacts.put({ kind: args.kind, createdBy: context.roleId, parentAgentRunId: context.parentAgentRunId, value: args.content ?? null });
+    const ref = context.artifacts.put({
+      kind: args.kind,
+      createdBy: context.roleId,
+      parentAgentRunId: context.parentAgentRunId,
+      value: { name: args.name, content: args.content },
+    });
     return { artifactId: ref.id };
   },
 };
 
-export const getArtifactTool: ServerToolDefinition<{ artifactId: string }, { artifactId: string; kind: string; summary: string }> = {
+export const getArtifactTool: ServerToolDefinition<z.infer<typeof getArtifactArgsSchema>, z.infer<typeof getArtifactResultSchema>> = {
   name: "get_artifact",
   description: "读取当前 run 的 artifact 摘要（不返回完整内部内容）。",
   argsSchema: getArtifactArgsSchema,
   resultSchema: getArtifactResultSchema,
-  allowedRoles: ["team_leader", "product_manager", "architect", "engineer", "data_scientist", "reviewer", "security_reviewer"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -42,12 +57,12 @@ export const getArtifactTool: ServerToolDefinition<{ artifactId: string }, { art
   },
 };
 
-export const compareArtifactsTool: ServerToolDefinition<{ aArtifactId: string; bArtifactId: string }, { sameKind: boolean; changedKeys: string[] }> = {
+export const compareArtifactsTool: ServerToolDefinition<z.infer<typeof compareArtifactsArgsSchema>, z.infer<typeof compareArtifactsResultSchema>> = {
   name: "compare_artifacts",
   description: "比较两个 artifact 的顶层差异。",
   argsSchema: compareArtifactsArgsSchema,
   resultSchema: compareArtifactsResultSchema,
-  allowedRoles: ["team_leader", "engineer", "reviewer"],
+  allowedRoles: ["team_leader"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {

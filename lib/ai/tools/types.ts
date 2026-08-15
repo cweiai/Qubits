@@ -48,6 +48,8 @@ export interface ChildAgentResult {
   artifactId: string | null;
   summary: string;
   issues: string[];
+  /** Stable failure code (e.g. AGENT_TOOL_BUDGET_EXCEEDED) so Mike can decide on a re-delegation. */
+  errorCode?: string | null;
 }
 
 /** Promotion request from complete_run: creates the immutable snapshot + project version. */

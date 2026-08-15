@@ -16,6 +16,8 @@ export const delegateToAgentResultSchema = z.object({
   artifactId: z.string().nullable(),
   summary: z.string().max(300),
   issues: z.array(z.string().max(200)).default([]),
+  /** Stable failure code when the child failed (for Mike's re-delegation decision). */
+  errorCode: z.string().max(60).nullable().optional(),
   /** Real artifacts produced during this child run (build_report / preview_bundle / test_report ids). */
   relatedArtifacts: z.array(z.object({ kind: z.string().max(40), artifactId: z.string().max(64) })).max(6).default([]),
 });
@@ -153,7 +155,14 @@ export const dataSchemaResultSchema = z.object({ collections: z.array(z.object({
 export const dataAccessResultSchema = z.object({ valid: z.boolean(), issues: z.array(z.string().max(300)).max(10) });
 
 // ── artifacts/approval/release ──
-export const createArtifactArgsSchema = z.object({ kind: z.enum(["product_brief", "research_report", "app_blueprint", "code_workspace", "build_report", "test_report", "review_report", "preview_bundle", "data_report", "file"]), name: z.string().min(1).max(120), content: z.unknown() });
+// create_artifact only stores intermediate "file" attachments; FINAL artifacts
+// (product_brief / app_blueprint / code_workspace / review_report / …) are persisted
+// exclusively by the orchestrator after finalSchema validation.
+export const createArtifactArgsSchema = z.object({
+  kind: z.literal("file"),
+  name: z.string().min(1).max(120),
+  content: z.string().min(1).max(120_000),
+});
 export const createArtifactResultSchema = z.object({ artifactId: z.string() });
 export const getArtifactArgsSchema = z.object({ artifactId: z.string().min(8).max(64) });
 export const getArtifactResultSchema = z.object({ artifactId: z.string(), kind: z.string(), summary: z.string().max(500) });
@@ -173,13 +182,18 @@ export const workspaceInitResultSchema = z.object({
   fileCount: z.number().int(),
 });
 export const workspaceGetManifestArgsSchema = z.object({}).strict();
-export const workspaceGetManifestResultSchema = z.object({
-  name: z.string().max(120),
-  description: z.string().max(1000),
-  main: z.string(),
-  collections: z.array(z.object({ name: z.string(), label: z.string(), allowedOperations: z.array(z.string()).max(5), fieldCount: z.number().int() })).max(8),
-  dependencies: z.array(z.object({ name: z.string(), version: z.string() })).max(12),
-});
+export const workspaceGetManifestResultSchema = z.union([
+  // New workspace: no manifest yet — a NORMAL initial state, not an error.
+  z.object({ exists: z.literal(false) }),
+  z.object({
+    exists: z.literal(true),
+    name: z.string().max(120),
+    description: z.string().max(1000),
+    main: z.string(),
+    collections: z.array(z.object({ name: z.string(), label: z.string(), allowedOperations: z.array(z.string()).max(5), fieldCount: z.number().int() })).max(8),
+    dependencies: z.array(z.object({ name: z.string(), version: z.string() })).max(12),
+  }),
+]);
 export const workspaceListFilesArgsSchema = z.object({ maxEntries: z.number().int().min(1).max(300).default(100) });
 export const workspaceListFilesResultSchema = z.object({
   entries: z.array(z.object({ path: z.string().max(300), type: z.enum(["file", "dir"]), size: z.number().int(), systemOwned: z.boolean() })).max(300),

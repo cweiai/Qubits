@@ -2,15 +2,24 @@ import "server-only";
 import type { QubitsManifest } from "@/lib/contracts/manifest";
 import type { AgentEvent } from "@/lib/contracts/agent-events";
 import { securityReviewSchema } from "@/lib/contracts/review";
+import {
+  appBlueprintWithSummarySchema,
+  codeWorkspaceSchema,
+  dataReportSchema,
+  productBriefWithSummarySchema,
+  researchReportSchema,
+} from "@/lib/contracts/artifacts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { ArtifactKind, ChildAgentRequest, ChildAgentResult, DataAdapter, PromoteRunInput, PromoteRunResult, ToolExecutionContext } from "./tools/types";
 import { ArtifactStore, type StoredArtifactEntry } from "./artifact-store";
 import { runToolCallingAgent, ToolLoopError } from "./tool-loop";
 import { getSandboxProvider, type SandboxProvider } from "./tools/sandbox-provider";
+import { ProviderError } from "./openai-provider";
 import { ROLE_DEFINITIONS } from "./roles";
 import { isAbortLike } from "@/lib/workspace/errors";
 import type { AIProvider } from "./provider";
+import type { z } from "zod";
 
 /**
  * Mike orchestration: single entry point for every run.
@@ -64,6 +73,51 @@ function expectedKind(expectedOutput: string): ArtifactKind {
     default:
       throw new ToolLoopError("INVALID_EXPECTED_OUTPUT", "未知的 expectedOutput：" + String(expectedOutput).slice(0, 60));
   }
+}
+
+/** Final-artifact kind → Zod schema. Persisting a deliverable REQUIRES passing this check. */
+const FINAL_ARTIFACT_SCHEMAS: Record<string, z.ZodType> = {
+  product_brief: productBriefWithSummarySchema,
+  research_report: researchReportSchema,
+  app_blueprint: appBlueprintWithSummarySchema,
+  code_workspace: codeWorkspaceSchema,
+  data_report: dataReportSchema,
+  review_report: securityReviewSchema,
+};
+
+/** Stable error code → short human label (the full message stays in the summary). */
+const ERROR_LABELS: Record<string, string> = {
+  PROVIDER_TIMEOUT: "模型超时",
+  PROVIDER_NETWORK_ERROR: "模型网络错误",
+  PROVIDER_RATE_LIMIT: "模型请求受限",
+  PROVIDER_AUTH_ERROR: "模型鉴权失败",
+  PROVIDER_BAD_REQUEST: "模型请求被拒绝",
+  PROVIDER_SERVER_ERROR: "模型服务错误",
+  AGENT_TOOL_BUDGET_EXCEEDED: "Agent 工具预算耗尽",
+  AGENT_DEADLINE_EXCEEDED: "Agent 总执行时间超限",
+  TOOL_FAILURE_LIMIT_EXCEEDED: "工具调用失败过多",
+  INVALID_TOOL_MESSAGE_SEQUENCE: "工具消息协议错误",
+};
+
+/** Extract a stable error code from any thrown value (ToolLoopError / ProviderError / code-carrying errors). */
+function stableErrorCode(error: unknown): string | null {
+  if (error instanceof ToolLoopError) return error.code;
+  if (error instanceof ProviderError) return error.code;
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code;
+  }
+  return null;
+}
+
+function friendlyMessage(error: unknown): { code: string; message: string } {
+  const code = stableErrorCode(error) ?? "ORCHESTRATION_ERROR";
+  const raw = error instanceof Error ? error.message.slice(0, 300) : "编排失败";
+  const label = ERROR_LABELS[code];
+  return {
+    code,
+    message: "[" + code + "] " + (label ? label + "：" : "") + raw,
+  };
 }
 
 export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunResult> {
@@ -192,6 +246,14 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
         providerOverride: input.providerOverride,
       });
       const kind = expectedKind(request.expectedOutput);
+      // Single persistence point: the orchestrator (never the child via create_artifact)
+      // stores the finalSchema-validated structured output exactly once.
+      const kindSchema = FINAL_ARTIFACT_SCHEMAS[kind];
+      if (kindSchema && !kindSchema.safeParse(result.artifact).success) {
+        const message = "子 Agent 最终产物未通过 " + kind + " 的结构校验（拒绝 JSON 字符串冒充结构化对象）。";
+        input.emit({ type: "agent_failed", agentRunId: childAgentRunId, roleId: request.roleId, message: message.slice(0, 300) });
+        return { status: "failed", artifactId: null, summary: message, issues: [message], errorCode: "INVALID_FINAL_ARTIFACT" };
+      }
       const artifactId = artifacts.put({
         kind,
         createdBy: request.roleId,
@@ -208,8 +270,8 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
     } catch (error) {
       // Aborts propagate to Mike's loop and the orchestrator maps them to CLIENT_ABORTED.
       if (input.signal?.aborted || isAbortLike(error)) throw error;
-      const message = error instanceof Error ? error.message.slice(0, 300) : "子 Agent 失败";
-      return { status: "failed", artifactId: null, summary: message, issues: [message] };
+      const { code, message } = friendlyMessage(error);
+      return { status: "failed", artifactId: null, summary: message.slice(0, 300), issues: [message.slice(0, 300)], errorCode: code };
     }
   }
 
@@ -261,8 +323,10 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
       input.emit({ type: "error", roleId: "team_leader", message: message.slice(0, 400), code: "CLIENT_ABORTED" });
       return { status: "failed", summary: message, suggestions: [] };
     }
-    const message = error instanceof ToolLoopError ? "[" + error.code + "] " + error.message.slice(0, 260) : error instanceof Error ? error.message.slice(0, 300) : "编排失败";
-    input.emit({ type: "error", roleId: "team_leader", message, code: error instanceof ToolLoopError ? error.code : "ORCHESTRATION_ERROR" });
+    // Stable provider/tool-loop codes survive to the API route and the database;
+    // a raw fetch failure is never recorded as ORCHESTRATION_ERROR again.
+    const { code, message } = friendlyMessage(error);
+    input.emit({ type: "error", roleId: "team_leader", message, code });
     return { status: "failed", summary: message, suggestions: [] };
   }
 }

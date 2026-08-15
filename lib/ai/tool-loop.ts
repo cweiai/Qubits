@@ -13,13 +13,56 @@ import { isAbortLike } from "@/lib/workspace/errors";
 /**
  * Centralized tool-calling agent loop:
  * - every provider round trip has a timeout/AbortSignal;
- * - max 80 rounds per agent (no global tool-call count limit);
+ * - per-role budgets: max rounds, max tool calls and a total wall-clock deadline
+ *   (the architect gets a much smaller budget than the engineer);
+ * - a TOTAL failure counter stops the agent even if successes are interleaved
+ *   (consecutiveFailures alone can be gamed);
+ * - identical successful calls are blocked after 3 consecutive repeats (loop guard);
  * - tool results are fed back to the same message as role:tool + tool_call_id;
- * - final text must pass the corresponding Zod schema;
- * - when the model makes no tool call but one is required, return TOOL_CALL_REQUIRED (never fake tool events).
+ * - final text must pass the corresponding Zod schema; on success the agent stops
+ *   immediately — the orchestrator persists the final artifact exactly once.
  */
 
-const MAX_ROUNDS = 80;
+interface RoleBudget {
+  maxRounds: number;
+  maxToolCalls: number;
+  deadlineMs: number;
+}
+
+/** Per-role convergence budgets: the architect is a pure designer and must converge fast. */
+const ROLE_BUDGETS: Record<RoleId, RoleBudget> = {
+  team_leader: { maxRounds: 40, maxToolCalls: 60, deadlineMs: 900_000 },
+  product_manager: { maxRounds: 8, maxToolCalls: 10, deadlineMs: 240_000 },
+  researcher: { maxRounds: 12, maxToolCalls: 20, deadlineMs: 300_000 },
+  architect: { maxRounds: 12, maxToolCalls: 12, deadlineMs: 240_000 },
+  engineer: { maxRounds: 60, maxToolCalls: 120, deadlineMs: 1_200_000 },
+  data_scientist: { maxRounds: 10, maxToolCalls: 15, deadlineMs: 240_000 },
+  reviewer: { maxRounds: 15, maxToolCalls: 30, deadlineMs: 600_000 },
+  security_reviewer: { maxRounds: 10, maxToolCalls: 20, deadlineMs: 300_000 },
+};
+
+function roleBudget(roleId: RoleId): RoleBudget {
+  const budget = ROLE_BUDGETS[roleId] ?? ROLE_BUDGETS.team_leader;
+  let next = { ...budget };
+  // Test/debug overrides (otherwise fixed per-role budgets); read at run start.
+  const deadlineOverride = Number.parseInt(process.env.QUIBITS_AGENT_DEADLINE_MS ?? "", 10);
+  if (Number.isFinite(deadlineOverride) && deadlineOverride > 0) next = { ...next, deadlineMs: deadlineOverride };
+  const maxRounds = Number.parseInt(process.env.QUIBITS_AGENT_MAX_ROUNDS ?? "", 10);
+  if (Number.isFinite(maxRounds) && maxRounds >= 1) next = { ...next, maxRounds };
+  const maxToolCalls = Number.parseInt(process.env.QUIBITS_AGENT_MAX_TOOL_CALLS ?? "", 10);
+  if (Number.isFinite(maxToolCalls) && maxToolCalls >= 1) next = { ...next, maxToolCalls };
+  return next;
+}
+
+/** Total tool-failure cap (regardless of interleaved successes). */
+export function readMaxTotalToolFailures(): number {
+  const parsed = Number.parseInt(process.env.QUIBITS_MAX_TOOL_FAILURES_TOTAL ?? "8", 10);
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 8;
+}
+
+/** Identical-successful-call repeats allowed before the loop guard trips. */
+const REPEAT_SUCCESS_LIMIT = 3;
+
 const TOOL_REQUIRED_CODE = "TOOL_CALL_REQUIRED";
 
 export class ToolLoopError extends Error {
@@ -174,11 +217,17 @@ function toolSpecsFor(roleId: RoleId): ToolSpec[] {
 export async function runToolCallingAgent(input: RunAgentInput): Promise<ValidatedAgentResult> {
   const provider = input.providerOverride ?? getProvider();
   const maxToolFailures = readMaxToolFailures();
+  const maxTotalFailures = readMaxTotalToolFailures();
+  const budget = roleBudget(input.roleId);
+  const loopStartedAt = Date.now();
   const messages: ChatMessage[] = [{ role: "user", content: input.taskPrompt }];
   let toolCallsMade = 0;
   let consecutiveFailures = 0;
+  let totalFailures = 0;
   // the previous failed call (tool name + normalized args + error code): used to fast-reject identical retries.
   let lastFailure: { name: string; argsKey: string; code: string } | null = null;
+  // loop guard for identical SUCCESSFUL calls: same name+args repeating consecutively.
+  let lastSuccess: { name: string; argsKey: string; count: number } | null = null;
 
   const respondTool = (callId: string, content: string): ChatMessage => ({
     role: "tool",
@@ -186,7 +235,14 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
     content: content.slice(0, 24 * 1024),
   });
 
-  for (let round = 0; round < MAX_ROUNDS; round++) {
+  for (let round = 0; round < budget.maxRounds; round++) {
+    // Total deadline: the agent does NOT get a fresh 90s budget every round.
+    if (Date.now() - loopStartedAt > budget.deadlineMs) {
+      throw new ToolLoopError(
+        "AGENT_DEADLINE_EXCEEDED",
+        "该 Agent 已超出总执行时限（" + Math.round(budget.deadlineMs / 1000) + " 秒）。已停止执行，请基于已有信息直接给出最终输出。"
+      );
+    }
     let turn: AgentTurnResponse;
     try {
       turn = await provider.generateWithTools({
@@ -217,9 +273,13 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
       const toolResults: ChatMessage[] = [];
       const failureInstructions: string[] = [];
       for (const call of calls) {
-        // No global call cap: only counted for stats; the failure threshold and round budget trip instead.
         input.context.counters.toolCalls += 1;
         toolCallsMade += 1;
+        if (toolCallsMade > budget.maxToolCalls) {
+          const message = "该 Agent 的工具调用次数超出预算（" + budget.maxToolCalls + "）。已停止执行，请基于已有信息直接给出最终输出。";
+          input.context.emit({ type: "error", roleId: input.roleId, message, code: "AGENT_TOOL_BUDGET_EXCEEDED" });
+          throw new ToolLoopError("AGENT_TOOL_BUDGET_EXCEEDED", message);
+        }
         const toolCallId = call.id;
         input.context.emit({
           type: "tool_call_started",
@@ -236,6 +296,12 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
           lastFailure.code !== "APPROVAL_REQUIRED" &&
           lastFailure.name === call.name &&
           lastFailure.argsKey === argsKey;
+        // loop guard for successes: the same call+args repeating consecutively cannot run forever.
+        const repeatedSuccess =
+          lastSuccess !== null &&
+          lastSuccess.name === call.name &&
+          lastSuccess.argsKey === argsKey &&
+          lastSuccess.count >= REPEAT_SUCCESS_LIMIT;
         let outcome: { ok: boolean; result: unknown; summary: string; errorCode?: string; artifactIds: string[]; durationMs: number };
         const startedAt = Date.now();
         if (identicalRetry) {
@@ -243,6 +309,15 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
             ok: false,
             result: null,
             summary: "与上一次失败的调用完全相同（" + call.name + "），已跳过执行。请修改参数或改用其他工具，不要原样重试。",
+            errorCode: "REPEATED_CALL",
+            artifactIds: [],
+            durationMs: 0,
+          };
+        } else if (repeatedSuccess) {
+          outcome = {
+            ok: false,
+            result: null,
+            summary: "同一工具调用（" + call.name + "）以相同参数已连续成功多次且无任何进展，已停止重复执行。请直接给出最终结构化输出，或改用其他工具。",
             errorCode: "REPEATED_CALL",
             artifactIds: [],
             durationMs: 0,
@@ -301,9 +376,15 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
         if (outcome.ok) {
           consecutiveFailures = 0;
           lastFailure = null;
+          // track identical successes to stop "success loops"
+          lastSuccess = lastSuccess && lastSuccess.name === call.name && lastSuccess.argsKey === argsKey
+            ? { name: call.name, argsKey, count: lastSuccess.count + 1 }
+            : { name: call.name, argsKey, count: 1 };
         } else {
           consecutiveFailures += 1;
+          totalFailures += 1;
           lastFailure = { name: call.name, argsKey, code: outcome.errorCode ?? "TOOL_ERROR" };
+          lastSuccess = null;
           // inject the failure and error into context so the agent corrects itself (fix args or try another approach)
           failureInstructions.push(
             "工具调用失败：" + call.name + "（错误码 " + (outcome.errorCode ?? "TOOL_ERROR") + "）：" + outcome.summary +
@@ -311,9 +392,10 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
             (errorHint ? "。修复建议：" + errorHint : "") +
             "。请修改参数、换一种方式完成目标，或改用其他可用工具后重试。"
           );
-          if (consecutiveFailures > maxToolFailures) {
+          // Total-failure cap: interleaving successes cannot reset the count forever.
+          if (consecutiveFailures > maxToolFailures || totalFailures > maxTotalFailures) {
             const message =
-              "工具调用连续失败 " + consecutiveFailures + " 次（阈值 " + maxToolFailures + "），已停止执行。最后错误：" + outcome.summary;
+              "工具调用连续失败 " + consecutiveFailures + " 次（累计 " + totalFailures + " 次，上限 " + maxTotalFailures + "），已停止执行。最后错误：" + outcome.summary;
             input.context.emit({ type: "error", roleId: input.roleId, message, code: "TOOL_FAILURE_LIMIT_EXCEEDED" });
             throw new ToolLoopError("TOOL_FAILURE_LIMIT_EXCEEDED", message);
           }
@@ -351,7 +433,7 @@ export async function runToolCallingAgent(input: RunAgentInput): Promise<Validat
     }
     messages.push({ role: "user", content: "你的输出不是合法 JSON：" + extracted.error.slice(0, 200) + "。请重新输出。" });
   }
-  throw new ToolLoopError("TOOL_BUDGET_EXCEEDED", "该 Agent 的对话轮次超出预算（" + MAX_ROUNDS + "）");
+  throw new ToolLoopError("AGENT_TOOL_BUDGET_EXCEEDED", "该 Agent 的对话轮次超出预算（" + budget.maxRounds + " 轮）");
 }
 
 function parseToolArgs(call: ToolCall): unknown {
@@ -397,7 +479,7 @@ function summarizeResult(toolName: string, result: unknown): string {
     case "workspace_init":
       return "工作区就绪（" + SEEDED_LABELS[str(record.seededFrom)] + "）· " + num(record.fileCount) + " 个文件";
     case "workspace_get_manifest":
-      return "manifest：「" + str(record.name) + "」· " + len(record.collections) + " 个集合 · " + len(record.dependencies) + " 个依赖";
+      return record.exists === false ? "manifest 尚未创建（新工作区正常状态）" : "manifest：「" + str(record.name) + "」· " + len(record.collections) + " 个集合 · " + len(record.dependencies) + " 个依赖";
     case "workspace_list_files":
       return "共 " + len(record.entries) + " 项" + (record.truncated ? "（已截断）" : "");
     case "dependency_list":

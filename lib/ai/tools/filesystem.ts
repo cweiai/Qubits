@@ -99,7 +99,7 @@ export const fsListTool: ServerToolDefinition<{ path: string; maxDepth: number; 
   description: "列出 workspace 内目录（限制深度与条目数）。path 必须是工作区内相对路径（禁止绝对路径、.. 与符号链接）。",
   argsSchema: fsListArgsSchema,
   resultSchema: fsListResultSchema,
-  allowedRoles: ["engineer", "reviewer", "team_leader", "architect"],
+  allowedRoles: ["engineer", "reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -135,7 +135,7 @@ export const fsReadTool: ServerToolDefinition<{ path: string; maxBytes: number }
   description: "读取 workspace 内文件（限制大小；路径必须安全且不含符号链接）。",
   argsSchema: fsReadArgsSchema,
   resultSchema: fsReadResultSchema,
-  allowedRoles: ["product_manager", "architect", "engineer", "reviewer", "team_leader", "data_scientist", "security_reviewer"],
+  allowedRoles: ["engineer", "reviewer", "security_reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {
@@ -219,7 +219,7 @@ export const fsStatTool: ServerToolDefinition<{ path: string }, { path: string; 
   description: "返回文件/目录元信息（lstat，不跟随符号链接）。",
   argsSchema: fsStatArgsSchema,
   resultSchema: fsStatResultSchema,
-  allowedRoles: ["engineer", "architect", "reviewer", "team_leader"],
+  allowedRoles: ["engineer", "reviewer"],
   risk: "low",
   requiresApproval: false,
   async execute(args, context) {

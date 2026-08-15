@@ -64,7 +64,7 @@ function makeContext(events: AgentEvent[]): ToolExecutionContext {
   return {
     runId: "run-selfcorr",
     parentAgentRunId: "agent-mike-000000000009",
-    roleId: "architect",
+    roleId: "engineer",
     depth: 1,
     signal: new AbortController().signal,
     currentManifest: makeTaskManifest(),
@@ -116,7 +116,7 @@ describe("工具失败后的自我纠错", () => {
     const context = makeContext(events);
     await expect(
       runToolCallingAgent({
-        roleId: "architect",
+        roleId: "engineer",
         agentRunId: "agent-selfcorr-a",
         systemPrompt: "测试",
         taskPrompt: "读取 /etc/hosts",
@@ -194,7 +194,7 @@ describe("工具失败后的自我纠错", () => {
       },
     };
     const result = await runToolCallingAgent({
-      roleId: "architect",
+      roleId: "engineer",
       agentRunId: "agent-selfcorr-c",
       systemPrompt: "测试",
       taskPrompt: "读取文件",

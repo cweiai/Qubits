@@ -66,15 +66,23 @@ describe("Registry 与权限", () => {
     }
   });
 
-  it("能力矩阵：非迈克不能 delegate；艾玛不能写文件；大卫不能 fs_list", () => {
+  it("能力矩阵：非迈克不能 delegate；艾玛不能写文件；大卫不能 fs_list；鲍勃被瘦身", () => {
     expect(getToolNamesForRole("team_leader")).toContain("delegate_to_agent");
     expect(getToolNamesForRole("product_manager")).not.toContain("delegate_to_agent");
     expect(getToolNamesForRole("product_manager")).not.toContain("fs_write");
     expect(getToolNamesForRole("data_scientist")).not.toContain("fs_list");
     expect(getToolNamesForRole("engineer")).toContain("bash");
-    expect(getToolNamesForRole("architect")).toContain("bash");
     expect(getToolNamesForRole("reviewer")).toContain("bash");
     expect(getToolNamesForRole("reviewer")).toContain("secret_scan");
+    // Architect: design-only — no bash, no fs tools, no create_artifact, no workspace_get_manifest.
+    expect(getToolNamesForRole("architect")).not.toContain("bash");
+    expect(getToolNamesForRole("architect")).not.toContain("fs_read");
+    expect(getToolNamesForRole("architect")).not.toContain("fs_list");
+    expect(getToolNamesForRole("architect")).not.toContain("create_artifact");
+    expect(getToolNamesForRole("architect")).not.toContain("workspace_get_manifest");
+    expect(getToolNamesForRole("architect")).toContain("inspect_current_app");
+    // Product manager: app-summary tool only.
+    expect(getToolNamesForRole("product_manager")).toEqual(["inspect_current_app"]);
   });
 
   it("权限矩阵由 allowedRoles 推导：被授予的工具必然可执行（无两层名单脱节）", () => {
@@ -86,9 +94,13 @@ describe("Registry 与权限", () => {
     }
   });
 
-  it("艾玛可以真实调用 workspace_get_manifest（曾因定义 allowedRoles 缺 product_manager 被拒）", async () => {
-    await executeTool("workspace_init", {}, makeContext());
-    // No template seeds a manifest anymore: write a valid one, then read it as Emma.
+  it("新工作区 workspace_get_manifest 返回 exists=false；写入有效 manifest 后返回 exists=true", async () => {
+    const ctx = makeContext();
+    await executeTool("workspace_init", {}, ctx);
+    // Skeleton-only workspace: missing manifest is a NORMAL state, not an error.
+    const missing = await executeTool("workspace_get_manifest", {}, ctx) as { exists: boolean };
+    expect(missing.exists).toBe(false);
+    // After the engineer writes a valid manifest it reports exists=true with the pinned entry.
     await executeTool(
       "fs_write",
       {
@@ -102,10 +114,11 @@ describe("Registry 与权限", () => {
           dependencies: [],
         }),
       },
-      makeContext()
+      ctx
     );
-    const manifest = await executeTool("workspace_get_manifest", {}, makeContext("product_manager")) as { name: string };
-    expect(manifest.name).toBe("测试应用");
+    const present = await executeTool("workspace_get_manifest", {}, ctx) as { exists: boolean; main?: string };
+    expect(present.exists).toBe(true);
+    expect(present.main).toBe("src/main.tsx");
   });
 
   it("越权调用被拒绝；未知工具被拒绝", async () => {
@@ -209,10 +222,10 @@ describe("工程检查与数据工具", () => {
   });
 });
 
-describe("P2 适配器 NOT_CONFIGURED", () => {
-  it("未配置外部服务时返回明确错误", async () => {
-    await expect(executeTool("publish_preview", {}, makeContext("team_leader"))).rejects.toThrowError(/未配置部署平台/);
-    await expect(executeTool("create_migration_plan", {}, makeContext("team_leader"))).rejects.toThrowError(/未配置迁移服务/);
+describe("P2 适配器未接入", () => {
+  it("发布/迁移适配器不向任何角色暴露（未配置时不伪造）", async () => {
+    await expect(executeTool("publish_preview", {}, makeContext("team_leader"))).rejects.toThrowError(/无权/);
+    await expect(executeTool("create_migration_plan", {}, makeContext("team_leader"))).rejects.toThrowError(/无权/);
   });
 });
 
