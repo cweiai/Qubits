@@ -15,9 +15,9 @@ export async function openFixture(page: Page, index = 0, mode: "visible" | "atta
   await page.goto("/?conversationId=" + E2E_CONVERSATION_IDS[index]);
   if (mode === "visible") {
     await expect(page.locator(FRAME)).toBeVisible({ timeout: 60_000 });
-    await expect(page.frameLocator(FRAME).locator("body > *").first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.frameLocator(FRAME).locator("body .app-shell")).toBeVisible({ timeout: 60_000 });
   } else {
     await expect(page.locator(FRAME)).toBeAttached({ timeout: 60_000 });
-    await expect(page.frameLocator(FRAME).locator("body > *").first()).toBeAttached({ timeout: 60_000 });
+    await expect(page.frameLocator(FRAME).locator("body .app-shell")).toBeAttached({ timeout: 60_000 });
   }
 }

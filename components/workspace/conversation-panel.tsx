@@ -6,89 +6,25 @@ import { ROLE_META } from "@/lib/contracts/agent-events";
 import { type ConversationMessage } from "@/lib/contracts/conversation";
 import { useWorkspace } from "@/lib/state/workspace-provider";
 import type { ApprovalRequestView } from "@/lib/state/workspace-reducer";
-import { RoleProgress } from "./role-progress";
-import { ToolStageGroup } from "./tool-stage-group";
+import { StageProgress } from "./stage-progress";
 import { RoleMessage } from "./role-message";
 import { PromptComposer } from "./prompt-composer";
 import { Button } from "@/components/ui/button";
-import { activeToolStage, groupToolEvents, type ToolStageGroupView } from "@/lib/workspace/message-view";
 
 /**
- * Conversation waterfall: user/role/system messages + tool-call cards on a shared
- * timeline. Tool cards are grouped into collapsible pipeline-stage blocks (collapsed
- * by default, the running stage auto-expands); cards update live (running → success/failed).
+ * Conversation waterfall: user/role/system messages on a shared timeline.
+ * Tool calls are never rendered; phase progress is shown by StageProgress, whose
+ * text comes from the staged chain-of-thought summaries.
  */
-
-type StreamItem =
-  | { kind: "message"; key: string; time: number; message: ConversationMessage }
-  | { kind: "stage"; key: string; time: number; group: ToolStageGroupView };
 
 export function ConversationPanel() {
   const { state } = useWorkspace();
   const scrollRef = useRef<HTMLDivElement>(null);
-  const latestTask = state.tasks[0] ?? null;
-
-  const toolGroups = useMemo(() => groupToolEvents(latestTask?.toolEvents ?? []), [latestTask]);
-
-  const stream = useMemo<StreamItem[]>(() => {
-    const items: StreamItem[] = state.messages.map((message) => ({
-      kind: "message",
-      key: message.id,
-      time: message.timestamp,
-      message,
-    }));
-    for (const group of toolGroups) {
-      const times = group.events.map((event) => event.timestamp || Number.MAX_SAFE_INTEGER);
-      const time = times.length > 0 ? Math.min(...times) : Number.MAX_SAFE_INTEGER;
-      items.push({ kind: "stage", key: "stage:" + latestTask?.id + ":" + group.stage, time, group });
-    }
-    return [...items].sort((a, b) => a.time - b.time);
-  }, [state.messages, toolGroups, latestTask?.id]);
 
   const activityKey = useMemo(
-    () =>
-      stream
-        .map((item) =>
-          item.kind === "message"
-            ? item.message.id + ":" + (item.message.status ?? "")
-            : item.key + ":" + item.group.events.map((e) => e.status).join(",")
-        )
-        .join("|"),
-    [stream]
+    () => state.messages.map((message) => message.id + ":" + (message.status ?? "")).join("|"),
+    [state.messages]
   );
-
-  // Collapse state: all collapsed by default; the running stage auto-expands (manually toggled blocks are left alone).
-  const [expandedStages, setExpandedStages] = useState<Set<string>>(new Set());
-  const manualRef = useRef<Set<string>>(new Set());
-  const autoRef = useRef<Set<string>>(new Set());
-  const isRunning = latestTask?.status === "running" || latestTask?.status === "pending";
-  const activeStage = isRunning && latestTask ? activeToolStage(latestTask.stage) : null;
-  const activeKey = activeStage && latestTask ? "stage:" + latestTask.id + ":" + activeStage : null;
-
-  useEffect(() => {
-    setExpandedStages((prev) => {
-      const next = new Set(prev);
-      // Stage switch / run finished: collapse previously auto-expanded blocks.
-      for (const key of autoRef.current) next.delete(key);
-      autoRef.current = new Set();
-      if (activeKey && !manualRef.current.has(activeKey)) {
-        next.add(activeKey);
-        autoRef.current.add(activeKey);
-      }
-      return next;
-    });
-  }, [activeKey]);
-
-  const toggleStage = (key: string) => {
-    manualRef.current.add(key);
-    autoRef.current.delete(key);
-    setExpandedStages((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -104,23 +40,13 @@ export function ConversationPanel() {
             正在加载消息…
           </div>
         ) : null}
-        <RoleProgress />
+        <StageProgress />
         {state.pendingApprovals.map((approval) => (
           <ApprovalCard key={approval.approvalId} approval={approval} />
         ))}
-        {stream.map((item) =>
-          item.kind === "message" ? (
-            <MessageRow key={item.key} message={item.message} />
-          ) : (
-            <ToolStageGroup
-              key={item.key}
-              group={item.group}
-              active={item.key === activeKey}
-              expanded={expandedStages.has(item.key)}
-              onToggle={() => toggleStage(item.key)}
-            />
-          )
-        )}
+        {state.messages.map((message) => (
+          <MessageRow key={message.id} message={message} />
+        ))}
         {!state.messagesLoading && state.messages.length === 0 ? (
           <p className="py-6 text-center text-xs text-muted-foreground">
             这是新的对话线程。描述你想要的应用，迈克会协调艾玛和亚历克斯完成生成。
@@ -130,6 +56,15 @@ export function ConversationPanel() {
       <PromptComposer />
     </div>
   );
+}
+
+function approvalLabel(toolName: string): string {
+  const labels: Record<string, string> = {
+    fs_delete: "删除文件/目录",
+    delete_record: "删除数据记录",
+    restore_checkpoint: "回滚工作区",
+  };
+  return labels[toolName] ?? "高风险操作";
 }
 
 function ApprovalCard({ approval }: { approval: ApprovalRequestView }) {
@@ -145,8 +80,11 @@ function ApprovalCard({ approval }: { approval: ApprovalRequestView }) {
       <div className="flex items-start gap-2">
         <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-amber-900">需要审批：{approval.toolName}</p>
-          <p className="mt-1 text-xs leading-relaxed text-amber-800">{approval.reason}</p>
+          <p className="text-sm font-medium text-amber-900">
+            需要审批：{approvalLabel(approval.toolName)}
+            <span className="ml-1.5 font-normal text-amber-700/70">（{approval.toolName}）</span>
+          </p>
+          <p className="mt-1 text-xs leading-relaxed whitespace-pre-wrap text-amber-800">{approval.reason}</p>
           <div className="mt-2 flex gap-2">
             <button type="button" disabled={busy} onClick={() => void decide("grant")} className="inline-flex h-7 items-center gap-1 rounded-md bg-amber-700 px-2.5 text-xs font-medium text-white disabled:opacity-50">
               <Check className="h-3 w-3" />允许一次

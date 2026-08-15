@@ -61,9 +61,17 @@ const roles = {
 };
 
 const agentRuns = [
-  { agentRunId: "run-mike", roleId: "team_leader", parentAgentRunId: null, status: "completed", taskSummary: "协调构建", summary: "已完成", at: 1 },
-  { agentRunId: "run-emma", roleId: "product_manager", parentAgentRunId: "run-mike", status: "completed", taskSummary: "整理需求", summary: "需求已确认", at: 2 },
-  { agentRunId: "run-alex", roleId: "engineer", parentAgentRunId: "run-mike", status: "completed", taskSummary: "实现应用", summary: "代码已完成", at: 4 },
+  { agentRunId: "run-mike", roleId: "team_leader", parentAgentRunId: null, status: "completed", taskSummary: "协调构建", summary: "已完成", at: 1, progress: [
+    { phase: "planning", summary: "需求已理解，正在确认产品范围。", at: 1 },
+    { phase: "previewing", summary: "预览已通过门禁并提交完成。", at: 6 },
+  ] },
+  { agentRunId: "run-emma", roleId: "product_manager", parentAgentRunId: "run-mike", status: "completed", taskSummary: "整理需求", summary: "需求已确认", at: 2, progress: [
+    { phase: "planning", summary: "产品需求与分工已确认。", at: 2 },
+  ] },
+  { agentRunId: "run-alex", roleId: "engineer", parentAgentRunId: "run-mike", status: "completed", taskSummary: "实现应用", summary: "代码已完成", at: 4, progress: [
+    { phase: "coding", summary: "应用代码已写入工作区。", at: 3 },
+    { phase: "validating", summary: "Lint、类型检查、测试与构建均已通过。", at: 5 },
+  ] },
 ];
 
 const toolEvents = [

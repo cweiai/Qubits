@@ -51,6 +51,24 @@ function withRolePatch(roles: Record<string, unknown>, roleId: string, patch: Re
   return JSON.stringify(next);
 }
 
+function progressListOf(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** Persist only the latest staged reasoning summary per phase per agent run. */
+function upsertPersistedProgress(list: unknown[], phase: string, summary: string, at: number): unknown[] {
+  const entry = { phase, summary, at };
+  const index = list.findIndex(
+    (item) => typeof item === "object" && item !== null && (item as { phase?: unknown }).phase === phase
+  );
+  if (index >= 0) {
+    const next = [...list];
+    next[index] = entry;
+    return next;
+  }
+  return [...list, entry];
+}
+
 export async function POST(request: NextRequest, context: RouteContext): Promise<Response> {
   const requestId = "req-" + crypto.randomUUID();
   // The run handle must outlive the stream setup (cleanup path in the outer catch).
@@ -216,10 +234,17 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
           }
           case "progress_summary": {
             // Only the bounded summary is persisted; raw reasoning_content never enters task state.
+            // The per-phase entry is what the client renders as stage progress (tool calls stay hidden).
             rolesJson = withRolePatch(JSON.parse(rolesJson), event.roleId, { summary: event.summary });
-            agentRuns = agentRuns.map((r) => ((r as { agentRunId: string }).agentRunId === event.agentRunId
-              ? { ...(r as object), summary: event.summary }
-              : r));
+            agentRuns = agentRuns.map((r) => {
+              const run = r as { agentRunId?: unknown; progress?: unknown };
+              if (run.agentRunId !== event.agentRunId) return r;
+              return {
+                ...(r as object),
+                summary: event.summary,
+                progress: upsertPersistedProgress(progressListOf(run.progress), event.phase, event.summary, now),
+              };
+            });
             repo.updateTask(task.id, {
               stage: event.phase,
               rolesJson,

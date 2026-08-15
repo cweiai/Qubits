@@ -28,7 +28,7 @@ test("端到端：持久化构建产物 → 沙盒预览 → 刷新恢复", asyn
 
   // The host page renders no app DOM.
   await expect(page.getByTestId("sandbox-iframe")).toBeVisible();
-  await expect(page.frameLocator(FRAME).locator("body > *").first()).toBeVisible();
+  await expect(page.frameLocator(FRAME).locator("body .app-shell")).toBeVisible();
 });
 
 test("预览产物在预览刷新与宿主刷新后保持可用", async ({ page }) => {
@@ -41,11 +41,11 @@ test("预览产物在预览刷新与宿主刷新后保持可用", async ({ page 
 
   // Preview refresh (rebuilds the session and iframe).
   await page.getByTestId("preview-refresh").click();
-  await expect(page.frameLocator(FRAME).locator("body > *").first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.frameLocator(FRAME).locator("body .app-shell")).toBeVisible({ timeout: 60_000 });
 
   // Host refresh.
   await page.reload();
-  await expect(page.frameLocator(FRAME).locator("body > *").first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.frameLocator(FRAME).locator("body .app-shell")).toBeVisible({ timeout: 60_000 });
   await expect(page.frameLocator(FRAME).locator("body")).not.toBeEmpty();
 });
 
@@ -70,7 +70,7 @@ test("Code Tab：真实快照文件树与只读源码；Logs Tab：真实构建/
 
   // Back to preview; the app still works.
   await page.getByTestId("preview-tab-preview").click();
-  await expect(page.frameLocator(FRAME).locator("body > *").first()).toBeVisible();
+  await expect(page.frameLocator(FRAME).locator("body .app-shell")).toBeVisible();
 });
 
 test("沙盒内 postMessage 缺少 targetOrigin 时自动补全为 *（WebKit SyntaxError 防护）", async ({ page }) => {
@@ -176,6 +176,6 @@ test("跨项目隔离：不同浏览器上下文拥有独立会话与预览", as
   const conversationB = new URL(pageB.url()).searchParams.get("conversationId");
   expect(conversationB).toMatch(/^conv-/);
   expect(conversationB).not.toBe(conversationA);
-  await expect(pageB.frameLocator(FRAME).locator("body > *").first()).toBeVisible();
+  await expect(pageB.frameLocator(FRAME).locator("body .app-shell")).toBeVisible();
   await contextB.close();
 });

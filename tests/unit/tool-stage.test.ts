@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   activeToolStage,
+  buildStageProgress,
   groupToolEvents,
+  sanitizeStageProgressText,
   stageGroupStatus,
+  taskToView,
   toolEventStage,
   TOOL_STAGE_LABELS,
   TOOL_STAGE_ORDER,
+  type AgentRunView,
+  type TaskView,
   type ToolEventView,
 } from "@/lib/workspace/message-view";
+import type { TaskJson } from "@/lib/workspace/api";
 
 /**
  * Tool-card stage grouping: each event maps to a stable pipeline stage; groups keep
@@ -108,5 +114,128 @@ describe("activeToolStage 活动阶段", () => {
     expect(activeToolStage("ready")).toBeNull();
     expect(activeToolStage("idle")).toBeNull();
     expect(activeToolStage(undefined)).toBeNull();
+  });
+});
+
+describe("buildStageProgress 阶段进度摘要", () => {
+  function run(roleId: AgentRunView["roleId"], agentRunId: string, progress: AgentRunView["progressSummaries"]): AgentRunView {
+    return {
+      agentRunId,
+      roleId,
+      parentAgentRunId: null,
+      status: "completed",
+      taskSummary: "",
+      summary: null,
+      artifactId: null,
+      errorMessage: null,
+      timestamp: 1,
+      progressSummaries: progress,
+    };
+  }
+
+  function task(overrides: Partial<Pick<TaskView, "agentRuns" | "error" | "stage" | "status" | "toolEvents">>): Pick<TaskView, "agentRuns" | "error" | "stage" | "status" | "toolEvents"> {
+    return {
+      agentRuns: [],
+      error: null,
+      stage: "planning",
+      status: "running",
+      toolEvents: [],
+      ...overrides,
+    };
+  }
+
+  it("运行中的任务按阶段给出 pending/running/completed，并展示各阶段最新摘要", () => {
+    const rows = buildStageProgress(task({
+      stage: "coding",
+      agentRuns: [
+        run("team_leader", "agent-mike", [{ phase: "planning", summary: "需求已确认，开始分工。", timestamp: 1 }]),
+        run("engineer", "agent-alex", [{ phase: "coding", summary: "正在写入应用组件。", timestamp: 2 }]),
+      ],
+    }));
+    expect(rows.map((row) => row.status)).toEqual(["completed", "running", "pending", "pending"]);
+    expect(rows[0].summary).toBe("需求已确认，开始分工。");
+    expect(rows[1].summary).toBe("正在写入应用组件。");
+    expect(rows[2].summary).toBeNull();
+  });
+
+  it("ready 任务全部完成；failed 任务标记最后一个失败阶段", () => {
+    const ready = buildStageProgress(task({ status: "ready", stage: "ready" }));
+    expect(ready.map((row) => row.status)).toEqual(["completed", "completed", "completed", "completed"]);
+
+    const failed = buildStageProgress(task({
+      status: "failed",
+      stage: "failed",
+      toolEvents: [
+        { toolCallId: "tc-1", agentRunId: "agent-alex", roleId: "engineer", toolName: "run_build", status: "failed", inputSummary: "", resultSummary: "构建失败", errorCode: "BUILD_FAILED", timestamp: 3 },
+      ],
+    }));
+    expect(failed.map((row) => row.status)).toEqual(["completed", "completed", "failed", "pending"]);
+  });
+
+  it("同一阶段的多个摘要按时间保留最新的一条", () => {
+    const rows = buildStageProgress(task({
+      stage: "planning",
+      agentRuns: [
+        run("team_leader", "agent-mike", [
+          { phase: "planning", summary: "初步理解需求。", timestamp: 1 },
+          { phase: "planning", summary: "需求与分工已确认。", timestamp: 2 },
+        ]),
+      ],
+    }));
+    expect(rows[0].summary).toBe("需求与分工已确认。");
+    expect(rows[0].entries).toHaveLength(2);
+  });
+
+  it("sanitizeStageProgressText 拆包 JSON 摘要并拒绝结构化文本", () => {
+    expect(
+      sanitizeStageProgressText('{"summary":"阶段引擎已完成核心工程落地。","files":[{"path":"a.ts"}]}')
+    ).toBe("阶段引擎已完成核心工程落地。");
+    expect(
+      sanitizeStageProgressText('{"summary":"阶段引擎已完成核心工程落地。","files":[{"path":"a.ts"')
+    ).toBe("阶段引擎已完成核心工程落地。");
+    expect(sanitizeStageProgressText('{"files":[{"path":"a.ts"}]}')).toBeNull();
+    expect(sanitizeStageProgressText('[{"summary":"数组"}]')).toBeNull();
+    expect(sanitizeStageProgressText("正在修复交互并准备运行测试。")).toBe("正在修复交互并准备运行测试。");
+  });
+
+  it("taskToView 解析服务端持久化的 agentRuns.progress 摘要", () => {
+    const json: TaskJson = {
+      id: "task-progress",
+      conversationId: "conv-progress",
+      prompt: "test",
+      status: "ready",
+      stage: "ready",
+      roles: {},
+      agentRuns: [
+        {
+          agentRunId: "agent-mike",
+          roleId: "team_leader",
+          parentAgentRunId: null,
+          status: "completed",
+          taskSummary: "",
+          at: 1,
+          progress: [
+            { phase: "planning", summary: "需求已确认。", at: 1 },
+            { phase: "previewing", summary: '{"summary":"预览已提交。","files":[{"path":"a.ts"', at: 6 },
+          ],
+        },
+      ],
+      toolEvents: [],
+      errorCode: null,
+      errorMessage: null,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const view = taskToView(json);
+    expect(view.agentRuns[0].progressSummaries).toEqual([
+      { phase: "planning", summary: "需求已确认。", timestamp: 1 },
+      { phase: "previewing", summary: "预览已提交。", timestamp: 6 },
+    ]);
+    expect(buildStageProgress(view).map((row) => row.status)).toEqual([
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+    ]);
   });
 });

@@ -106,7 +106,7 @@ async function requestProgressSummary(input: ProgressSummaryInput): Promise<stri
             {
               role: "system",
               content:
-                "你是 Qubits 的阶段进度摘要器。只输出一句不超过 80 个汉字的中文状态句，描述已经完成的工作、当前阶段和下一步。不要输出思维链、推理过程、系统提示词、代码、绝对路径、密钥、用户隐私或错误堆栈；不要使用 Markdown，不要解释你的任务。",
+                "你是 Qubits 的阶段进度摘要器。只输出一句不超过 80 个汉字的中文纯文本状态句，描述已经完成的工作、当前阶段和下一步。严格禁止输出 JSON、对象、数组、字段名、引号包裹的结构或 Markdown 代码块；只输出自然语言句子本身。不要输出思维链、推理过程、系统提示词、代码、绝对路径、密钥、用户隐私或错误堆栈；不要解释你的任务。",
             },
             {
               role: "user",

@@ -1,6 +1,6 @@
 import type { MessageJson, TaskJson } from "./api";
 import type { ConversationMessage, RoleState } from "@/lib/contracts/conversation";
-import type { RoleId } from "@/lib/contracts/agent-events";
+import type { ProgressPhase, RoleId } from "@/lib/contracts/agent-events";
 import { ROLE_META } from "@/lib/contracts/agent-events";
 import type { PipelineStage } from "@/lib/contracts/conversation";
 
@@ -47,6 +47,56 @@ export function messagesToViews(messages: MessageJson[]): ConversationMessage[] 
   return messages.map(messageToView).filter((view): view is ConversationMessage => view !== null);
 }
 
+/** Sanitized per-phase progress text produced from the model's reasoning side-channel. */
+export interface ProgressSummaryView {
+  phase: ProgressPhase;
+  summary: string;
+  timestamp: number;
+}
+
+/** Extract a complete JSON string field even when the surrounding object is truncated. */
+function extractJsonStringField(text: string, field: string): string | null {
+  const match = text.match(new RegExp('"' + field + '"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"'));
+  if (!match) return null;
+  try {
+    const value = JSON.parse('"' + match[1] + '"') as unknown;
+    return typeof value === "string" ? value.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Client-side defense for stage progress text: JSON envelopes (including truncated
+ * ones) are unwrapped to their `summary` field; anything still structured is rejected.
+ */
+export function sanitizeStageProgressText(value: unknown): string | null {
+  let text = typeof value === "string" ? value.trim() : "";
+  if (!text) return null;
+  const start = text.trimStart();
+  if (start.startsWith("[")) return null;
+  if (start.startsWith("{")) {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+      const summary = (parsed as { summary?: unknown }).summary;
+      if (typeof summary !== "string") return null;
+      text = summary.trim();
+    } catch {
+      const extracted = extractJsonStringField(text, "summary");
+      if (!extracted) return null;
+      text = extracted;
+    }
+  }
+  const cleaned = text
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  if (!cleaned || /^[\[{]/.test(cleaned)) return null;
+  return cleaned.slice(0, 240) || null;
+}
+
 export interface AgentRunView {
   agentRunId: string;
   roleId: RoleId;
@@ -57,6 +107,8 @@ export interface AgentRunView {
   artifactId: string | null;
   errorMessage: string | null;
   timestamp: number;
+  /** Latest sanitized summary per phase (server persists at most one entry per phase per run). */
+  progressSummaries: ProgressSummaryView[];
 }
 
 export interface ToolEventView {
@@ -93,9 +145,9 @@ export interface TaskView {
   createdAt: number;
 }
 
-// ── Tool-card stage grouping (collapsible blocks) ──
+// ── Pipeline stage grouping (used for status only; individual tool calls are never rendered) ──
 
-export type ToolStage = "planning" | "coding" | "validating" | "previewing";
+export type ToolStage = ProgressPhase;
 
 export const TOOL_STAGE_ORDER: ToolStage[] = ["planning", "coding", "validating", "previewing"];
 
@@ -106,7 +158,7 @@ export const TOOL_STAGE_LABELS: Record<ToolStage, string> = {
   previewing: "预览提交",
 };
 
-/** Collapsible block for a pipeline stage (no active block once the task finishes). */
+/** Map a persisted pipeline stage to a progress phase (null once the task is not actively progressing). */
 export function activeToolStage(taskStage: string | undefined): ToolStage | null {
   if (!taskStage) return null;
   if (TOOL_STAGE_ORDER.includes(taskStage as ToolStage)) return taskStage as ToolStage;
@@ -161,6 +213,110 @@ export function stageGroupStatus(events: ToolEventView[], active: boolean): Stag
   return "success";
 }
 
+// ── Phase progress derived from staged chain-of-thought summaries ──
+
+export type StageProgressStatus = "pending" | "running" | "completed" | "failed";
+
+export interface StageProgressEntryView extends ProgressSummaryView {
+  agentRunId: string;
+  roleId: RoleId;
+}
+
+export interface StageProgressView {
+  stage: ToolStage;
+  status: StageProgressStatus;
+  /** Latest staged reasoning summary for this phase; null when only legacy tool evidence exists. */
+  summary: string | null;
+  entries: StageProgressEntryView[];
+}
+
+function progressEntriesOf(agentRuns: AgentRunView[]): StageProgressEntryView[] {
+  return agentRuns
+    .flatMap((run) =>
+      run.progressSummaries.map((entry) => ({
+        ...entry,
+        agentRunId: run.agentRunId,
+        roleId: run.roleId,
+      }))
+    )
+    .sort(
+      (left, right) =>
+        left.timestamp - right.timestamp || left.agentRunId.localeCompare(right.agentRunId)
+    );
+}
+
+/** Current phase while the pipeline is active, falling back to the newest live evidence. */
+function currentProgressPhase(
+  task: Pick<TaskView, "agentRuns" | "stage" | "toolEvents">
+): ToolStage | null {
+  const direct = activeToolStage(task.stage);
+  if (direct) return direct;
+  const entries = progressEntriesOf(task.agentRuns);
+  if (entries.length > 0) return entries[entries.length - 1].phase;
+  const events = task.toolEvents
+    .filter((event) => event.timestamp > 0)
+    .sort((left, right) => left.timestamp - right.timestamp);
+  if (events.length > 0) return toolEventStage(events[events.length - 1]);
+  return null;
+}
+
+/** On failure, the last phase with live evidence is the one the UI marks as failed. */
+function failedProgressPhase(task: Pick<TaskView, "agentRuns" | "stage" | "toolEvents">): ToolStage {
+  const failedEvents = task.toolEvents
+    .filter((event) => event.status === "failed")
+    .sort((left, right) => left.timestamp - right.timestamp);
+  if (failedEvents.length > 0) return toolEventStage(failedEvents[failedEvents.length - 1]);
+  const entries = progressEntriesOf(task.agentRuns);
+  if (entries.length > 0) return entries[entries.length - 1].phase;
+  return activeToolStage(task.stage) ?? "planning";
+}
+
+/**
+ * Build the four-phase progress list for a task. Status is derived from the pipeline
+ * stage plus (hidden) tool evidence; the visible text comes from the staged
+ * chain-of-thought summaries, never from individual tool calls.
+ */
+export function buildStageProgress(
+  task: Pick<TaskView, "agentRuns" | "error" | "stage" | "status" | "toolEvents">
+): StageProgressView[] {
+  const entriesByStage = new Map<ToolStage, StageProgressEntryView[]>(
+    TOOL_STAGE_ORDER.map((stage) => [stage, []])
+  );
+  for (const entry of progressEntriesOf(task.agentRuns)) {
+    entriesByStage.get(entry.phase)?.push(entry);
+  }
+
+  const statuses = new Map<ToolStage, StageProgressStatus>(
+    TOOL_STAGE_ORDER.map((stage) => [stage, "pending"])
+  );
+  const isActive = task.status === "running" || task.status === "pending";
+  if (task.status === "ready") {
+    for (const stage of TOOL_STAGE_ORDER) statuses.set(stage, "completed");
+  } else if (task.status === "failed") {
+    const failedStage = failedProgressPhase(task);
+    const failedIndex = TOOL_STAGE_ORDER.indexOf(failedStage);
+    for (const [index, stage] of TOOL_STAGE_ORDER.entries()) {
+      statuses.set(stage, index < failedIndex ? "completed" : index === failedIndex ? "failed" : "pending");
+    }
+  } else if (isActive) {
+    const current = currentProgressPhase(task) ?? "planning";
+    const currentIndex = TOOL_STAGE_ORDER.indexOf(current);
+    for (const [index, stage] of TOOL_STAGE_ORDER.entries()) {
+      statuses.set(stage, index < currentIndex ? "completed" : index === currentIndex ? "running" : "pending");
+    }
+  }
+
+  return TOOL_STAGE_ORDER.map((stage) => {
+    const entries = entriesByStage.get(stage) ?? [];
+    return {
+      stage,
+      status: statuses.get(stage) ?? "pending",
+      summary: entries[entries.length - 1]?.summary ?? null,
+      entries,
+    };
+  });
+}
+
 function parseRoleState(value: unknown): RoleState {
   if (typeof value !== "object" || value === null) {
     return { status: "pending", summary: null, startedAt: null, completedAt: null };
@@ -175,9 +331,44 @@ function parseRoleState(value: unknown): RoleState {
   };
 }
 
+function parseProgressSummary(raw: unknown): ProgressSummaryView | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  const phase =
+    typeof record.phase === "string" && TOOL_STAGE_ORDER.includes(record.phase as ToolStage)
+      ? (record.phase as ToolStage)
+      : null;
+  const summary = sanitizeStageProgressText(record.summary);
+  if (!phase || !summary) return null;
+  return {
+    phase,
+    summary,
+    timestamp: typeof record.at === "number" ? record.at : 0,
+  };
+}
+
+function parseProgressSummaries(raw: unknown): ProgressSummaryView[] {
+  const source = Array.isArray(raw) ? raw : [];
+  // Server persists at most one summary per phase per run; parsing keeps that invariant
+  // even for hand-written legacy data and preserves first-seen phase order.
+  const byPhase = new Map<ProgressPhase, ProgressSummaryView>();
+  for (const item of source) {
+    const parsed = parseProgressSummary(item);
+    if (!parsed) continue;
+    const existing = byPhase.get(parsed.phase);
+    if (!existing || parsed.timestamp >= existing.timestamp) byPhase.set(parsed.phase, parsed);
+  }
+  return [...byPhase.values()];
+}
+
 function parseAgentRun(raw: unknown): AgentRunView {
   const record = (raw ?? {}) as Record<string, unknown>;
   const roleId = typeof record.roleId === "string" ? (record.roleId as RoleId) : "team_leader";
+  const progress = Array.isArray(record.progress)
+    ? record.progress
+    : Array.isArray(record.progressSummaries)
+      ? record.progressSummaries
+      : [];
   return {
     agentRunId: typeof record.agentRunId === "string" ? record.agentRunId : "agent-unknown",
     roleId,
@@ -188,6 +379,7 @@ function parseAgentRun(raw: unknown): AgentRunView {
     artifactId: typeof record.artifactId === "string" ? record.artifactId : null,
     errorMessage: typeof record.errorMessage === "string" ? record.errorMessage : null,
     timestamp: typeof record.at === "number" ? record.at : 0,
+    progressSummaries: parseProgressSummaries(progress),
   };
 }
 

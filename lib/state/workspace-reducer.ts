@@ -1,7 +1,7 @@
-import { ROLE_RUNNING_TEXT, type AgentEvent, type RoleId } from "@/lib/contracts/agent-events";
+import { ROLE_RUNNING_TEXT, type AgentEvent, type ProgressPhase, type RoleId } from "@/lib/contracts/agent-events";
 import { type ConversationMessage } from "@/lib/contracts/conversation";
 import type { ApprovalJson, ConversationSummary, TaskJson } from "@/lib/workspace/api";
-import { taskToView, type AgentRunView, type TaskView } from "@/lib/workspace/message-view";
+import { sanitizeStageProgressText, taskToView, type AgentRunView, type ProgressSummaryView, type TaskView } from "@/lib/workspace/message-view";
 import type { WorkspacePreferences } from "@/lib/storage/project-storage";
 
 /**
@@ -129,6 +129,23 @@ function upsertAgentRun(runs: AgentRunView[], run: AgentRunView) {
   return [...runs, run];
 }
 
+/** Keep only the latest staged chain-of-thought summary for each phase (bounded to 4 per run). */
+function upsertProgressSummary(
+  summaries: ProgressSummaryView[],
+  phase: ProgressPhase,
+  summary: string,
+  timestamp: number
+): ProgressSummaryView[] {
+  const entry: ProgressSummaryView = { phase, summary, timestamp };
+  const index = summaries.findIndex((item) => item.phase === phase);
+  if (index >= 0) {
+    const next = [...summaries];
+    next[index] = entry;
+    return next;
+  }
+  return [...summaries, entry];
+}
+
 function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent, now: number): WorkspaceState {
   const task = state.tasks.find((t) => t.id === taskId);
   if (!task) {
@@ -185,11 +202,12 @@ function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent
       patchTask((t) => ({
         ...t,
         roles: { ...t.roles, [event.roleId]: { ...(t.roles[event.roleId] ?? { status: "pending", summary: null, startedAt: null, completedAt: null }), status: "running", startedAt: now } },
-        agentRuns: upsertAgentRun(t.agentRuns, { agentRunId: event.agentRunId, roleId: event.roleId, parentAgentRunId: event.parentAgentRunId, status: "running", taskSummary: event.taskSummary, summary: null, artifactId: null, errorMessage: null, timestamp: now }),
+        agentRuns: upsertAgentRun(t.agentRuns, { agentRunId: event.agentRunId, roleId: event.roleId, parentAgentRunId: event.parentAgentRunId, status: "running", taskSummary: event.taskSummary, summary: null, artifactId: null, errorMessage: null, timestamp: now, progressSummaries: [] }),
       }));
       break;
     }
     case "progress_summary": {
+      const safeSummary = sanitizeStageProgressText(event.summary);
       patchTask((t) => ({
         ...t,
         stage: event.phase,
@@ -197,11 +215,19 @@ function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent
           ...t.roles,
           [event.roleId]: {
             ...(t.roles[event.roleId] ?? { status: "running", summary: null, startedAt: now, completedAt: null }),
-            summary: event.summary,
+            summary: safeSummary ?? t.roles[event.roleId]?.summary ?? null,
           },
         },
         agentRuns: t.agentRuns.map((run) =>
-          run.agentRunId === event.agentRunId ? { ...run, summary: event.summary } : run
+          run.agentRunId === event.agentRunId
+            ? {
+                ...run,
+                summary: safeSummary ?? run.summary,
+                progressSummaries: safeSummary
+                  ? upsertProgressSummary(run.progressSummaries, event.phase, safeSummary, now)
+                  : run.progressSummaries,
+              }
+            : run
         ),
       }));
       break;
@@ -209,7 +235,7 @@ function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent
     case "agent_delegated": {
       patchTask((t) => ({
         ...t,
-        agentRuns: upsertAgentRun(t.agentRuns, { agentRunId: event.childAgentRunId, roleId: event.targetRole, parentAgentRunId: event.parentAgentRunId, status: "pending", taskSummary: event.taskSummary, summary: null, artifactId: null, errorMessage: null, timestamp: now }),
+        agentRuns: upsertAgentRun(t.agentRuns, { agentRunId: event.childAgentRunId, roleId: event.targetRole, parentAgentRunId: event.parentAgentRunId, status: "pending", taskSummary: event.taskSummary, summary: null, artifactId: null, errorMessage: null, timestamp: now, progressSummaries: [] }),
       }));
       break;
     }
@@ -376,8 +402,8 @@ function applyTaskEvent(state: WorkspaceState, taskId: string, event: AgentEvent
         error: { roleId, message: event.message },
         roles: { ...t.roles, [roleId]: { ...t.roles[roleId], status: "error", summary: event.message, completedAt: now } },
       }));
-      // Render only one error card: the role failure state is shown by the role list (RoleProgress);
-      // don't also append a role message card for the same error, so error content doesn't appear twice.
+      // Render only one error card: the failure state is shown by the stage progress list,
+      // so don't also append a role message card for the same error.
       const errorCard: ConversationMessage = {
         id: "live:" + taskId + ":error",
         type: "error",

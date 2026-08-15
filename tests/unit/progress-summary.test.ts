@@ -107,6 +107,17 @@ describe("独立阶段进度摘要", () => {
     expect(sanitizeProgressSummary("正在修复交互并准备运行测试。\n")).toBe("正在修复交互并准备运行测试。");
   });
 
+  it("结构化 JSON 永远不能进入阶段进度：完整与截断的 summary 字段会被拆包，其他 JSON 被拒绝", () => {
+    expect(
+      sanitizeProgressSummary('{"summary":"阶段引擎已完成核心工程落地。","files":[{"path":"a.ts"}]}')
+    ).toBe("阶段引擎已完成核心工程落地。");
+    expect(
+      sanitizeProgressSummary('{"summary":"阶段引擎已完成核心工程落地。","files":[{"path":"a.ts"')
+    ).toBe("阶段引擎已完成核心工程落地。");
+    expect(sanitizeProgressSummary('{"files":[{"path":"a.ts"}]}')).toBeNull();
+    expect(sanitizeProgressSummary('[{"summary":"数组不是进度"}]')).toBeNull();
+  });
+
   it("摘要失败不会阻塞主 Agent，并成功发出安全事件", async () => {
     const events: AgentEvent[] = [];
     let calls = 0;
