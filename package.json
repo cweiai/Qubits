@@ -4,7 +4,7 @@
   "private": true,
   "description": "Qubits — 多角色协作的对话式网页应用生成器",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --hostname 127.0.0.1",
     "build": "next build",
     "start": "next start",
     "db:migrate": "node scripts/migrate.mjs",
