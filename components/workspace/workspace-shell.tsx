@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Boxes, Menu, PanelRightClose, PanelRightOpen, RotateCcw } from "lucide-react";
 import { WorkspaceProvider, useWorkspace } from "@/lib/state/workspace-provider";
 import { ConversationPanel } from "./conversation-panel";
@@ -17,14 +17,22 @@ import {
 } from "@/components/ui/dialog";
 import { usePreviewPanelPolicy } from "@/hooks/use-preview-panel-policy";
 import { cn } from "@/lib/utils";
+import {
+  PREVIEW_DEFAULT_WIDTH,
+  PREVIEW_MAX_WIDTH,
+  PREVIEW_MIN_WIDTH,
+} from "@/lib/storage/project-storage";
 
 type StatusTone = "green" | "amber" | "red" | "gray";
 type MobileTab = "conversation" | "preview";
 
 const SIDEBAR_WIDTH = 280;
 const SIDEBAR_RAIL_WIDTH = 56;
-const PREVIEW_WIDTH = 420;
 const PREVIEW_RAIL_WIDTH = 48;
+
+function clampPreviewWidth(value: number): number {
+  return Math.min(PREVIEW_MAX_WIDTH, Math.max(PREVIEW_MIN_WIDTH, Math.round(value)));
+}
 
 export function WorkspaceShell() {
   return (
@@ -46,6 +54,42 @@ function WorkspaceInner() {
 
   const policy = usePreviewPanelPolicy(state.prefs.rightPreview);
   const currentTaskId = state.runningTask?.taskId ?? null;
+  const [previewWidth, setPreviewWidth] = useState(state.prefs.previewWidth);
+  const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+
+  // Keep the draft in sync with restored/updated preferences (e.g. another tab or reset).
+  useEffect(() => {
+    setPreviewWidth(state.prefs.previewWidth);
+  }, [state.prefs.previewWidth]);
+
+  const savePreviewWidth = (width: number) => {
+    const next = clampPreviewWidth(width);
+    setPreviewWidth(next);
+    workspace.setPreferences({ ...state.prefs, previewWidth: next });
+  };
+
+  const startPreviewResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!rightExpanded) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: previewWidth };
+  };
+
+  const movePreviewResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = resizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setPreviewWidth(clampPreviewWidth(drag.startWidth + (drag.startX - event.clientX)));
+  };
+
+  const finishPreviewResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = resizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    resizeRef.current = null;
+    savePreviewWidth(drag.startWidth + (drag.startX - event.clientX));
+  };
+
+  const resetPreviewWidth = () => savePreviewWidth(PREVIEW_DEFAULT_WIDTH);
+
   // A committed preview bundle is the only signal that an app exists.
   const hasPreviewNow = state.previewBundleId != null;
   // Seed from the first-frame real state so a refresh does not mistake an existing
@@ -177,13 +221,38 @@ function WorkspaceInner() {
         {/* Desktop right preview (collapsible; iframe stays mounted while collapsed) */}
         <aside
           className="relative hidden shrink-0 overflow-hidden border-l bg-zinc-100 transition-[width] duration-200 md:block"
-          style={{ width: rightExpanded ? PREVIEW_WIDTH : PREVIEW_RAIL_WIDTH }}
+          style={{ width: rightExpanded ? previewWidth : PREVIEW_RAIL_WIDTH }}
           aria-label="应用预览"
         >
+          {rightExpanded ? (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="调整预览面板宽度"
+              aria-valuemin={PREVIEW_MIN_WIDTH}
+              aria-valuemax={PREVIEW_MAX_WIDTH}
+              aria-valuenow={previewWidth}
+              tabIndex={0}
+              data-testid="preview-resize-handle"
+              title="拖拽调整宽度 · 双击恢复默认"
+              className="group absolute inset-y-0 left-0 z-20 w-1.5 cursor-ew-resize touch-none outline-none"
+              onPointerDown={startPreviewResize}
+              onPointerMove={movePreviewResize}
+              onPointerUp={finishPreviewResize}
+              onPointerCancel={finishPreviewResize}
+              onDoubleClick={resetPreviewWidth}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowLeft") savePreviewWidth(previewWidth - 16);
+                if (event.key === "ArrowRight") savePreviewWidth(previewWidth + 16);
+              }}
+            >
+              <span className="absolute left-1/2 top-1/2 h-8 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-zinc-300 transition-colors group-hover:bg-sky-500" />
+            </div>
+          ) : null}
           <div
             className={cn("absolute inset-y-0 right-12 left-0", rightExpanded ? "" : "pointer-events-none opacity-0")}
             aria-hidden={!rightExpanded}
-            style={{ width: PREVIEW_WIDTH - PREVIEW_RAIL_WIDTH }}
+            style={{ width: previewWidth - PREVIEW_RAIL_WIDTH }}
           >
             <PreviewPanel />
           </div>

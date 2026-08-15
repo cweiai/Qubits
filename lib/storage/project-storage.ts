@@ -10,22 +10,29 @@ import { z } from "zod";
 const LEGACY_STORAGE_KEY = "qubits.project.v2";
 const PREFS_STORAGE_KEY = "qubits.prefs.v1";
 
+export const PREVIEW_MIN_WIDTH = 360;
+export const PREVIEW_MAX_WIDTH = 900;
+export const PREVIEW_DEFAULT_WIDTH = 420;
+
 export interface WorkspacePreferences {
   leftSidebar: "expanded" | "collapsed";
   rightPreview: "expanded" | "collapsed";
   previewDevice: "desktop" | "mobile";
+  previewWidth: number;
 }
 
 const DEFAULT_PREFERENCES: WorkspacePreferences = {
   leftSidebar: "expanded",
   rightPreview: "expanded",
   previewDevice: "desktop",
+  previewWidth: PREVIEW_DEFAULT_WIDTH,
 };
 
 const preferencesSchema = z.object({
   leftSidebar: z.enum(["expanded", "collapsed"]),
   rightPreview: z.enum(["expanded", "collapsed"]),
   previewDevice: z.enum(["desktop", "mobile"]),
+  previewWidth: z.number().int().min(PREVIEW_MIN_WIDTH).max(PREVIEW_MAX_WIDTH).default(PREVIEW_DEFAULT_WIDTH),
 });
 
 export function loadPreferences(): WorkspacePreferences {
