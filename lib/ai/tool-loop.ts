@@ -50,11 +50,11 @@ interface RoleBudget {
   deadlineMs: number;
 }
 
-/** Per-role convergence budgets keep routing concise while giving code generation room. */
+/** Per-role convergence budgets: every agent may spend up to 600 conversation rounds. */
 const ROLE_BUDGETS: Record<RoleId, RoleBudget> = {
-  team_leader: { maxRounds: 80, maxToolCalls: 160, deadlineMs: 1_800_000 },
-  product_manager: { maxRounds: 16, maxToolCalls: 30, deadlineMs: 300_000 },
-  engineer: { maxRounds: 160, maxToolCalls: 320, deadlineMs: 1_800_000 },
+  team_leader: { maxRounds: 600, maxToolCalls: 160, deadlineMs: 1_800_000 },
+  product_manager: { maxRounds: 600, maxToolCalls: 30, deadlineMs: 300_000 },
+  engineer: { maxRounds: 600, maxToolCalls: 320, deadlineMs: 1_800_000 },
 };
 
 function roleBudget(roleId: RoleId): RoleBudget {
@@ -84,10 +84,10 @@ function roleBudget(roleId: RoleId): RoleBudget {
 /** Total tool-failure cap (regardless of interleaved successes). */
 export function readMaxTotalToolFailures(): number {
   const parsed = Number.parseInt(
-    process.env.QUIBITS_MAX_TOOL_FAILURES_TOTAL ?? "8",
+    process.env.QUIBITS_MAX_TOOL_FAILURES_TOTAL ?? "24",
     10,
   );
-  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 8;
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 24;
 }
 
 /** Consecutive tool-failure threshold: QUIBITS_MAX_TOOL_FAILURES (default 3, min 1). */
@@ -362,6 +362,14 @@ function noProgressPolicy(roleId: RoleId): ControllerDirective | "gate" {
   }
 }
 
+/**
+ * Cheap, non-mutating recoverable failures still count toward the consecutive-failure
+ * guard, but not toward the lifetime total-failure cap. A batch of stale fs_patch
+ * oldText after run_format is the canonical case: the model gets corrective feedback
+ * and usually succeeds on the next turn, so it should not exhaust the run budget.
+ */
+const SOFT_TOTAL_FAILURE_CODES = new Set(["PATCH_NO_MATCH"]);
+
 /** Codes that must never receive retry advice. */
 const NO_RETRY_CODES = new Set([
   "DUPLICATE_OBSERVATION",
@@ -562,6 +570,7 @@ export async function runToolCallingAgent(
   let toolCallsMade = 0;
   let consecutiveFailures = 0;
   let totalFailures = 0;
+  let thresholdFailures = 0;
   const progressSummaryState: ProgressSummaryState = {
     phase: null,
     lastStartedAt: 0,
@@ -989,6 +998,7 @@ export async function runToolCallingAgent(
           }
           consecutiveFailures += 1;
           totalFailures += 1;
+          if (!SOFT_TOTAL_FAILURE_CODES.has(code)) thresholdFailures += 1;
           failureInstructions.push(
             "工具调用失败：" +
               call.name +
@@ -1003,13 +1013,15 @@ export async function runToolCallingAgent(
           );
           if (
             consecutiveFailures > maxToolFailures ||
-            totalFailures > maxTotalFailures
+            thresholdFailures > maxTotalFailures
           ) {
             const message =
               "工具调用连续失败 " +
               consecutiveFailures +
               " 次（累计 " +
               totalFailures +
+              " 次，其中计入上限 " +
+              thresholdFailures +
               " 次，上限 " +
               maxTotalFailures +
               "），已停止执行。最后错误：" +
@@ -1284,13 +1296,14 @@ async function executeCall(
       definition?.requiresApproval &&
       !isToolApproved(input.context, call.name)
     ) {
-      const approvalId = createApprovalFor(input.context, toolCallId, call.name, "工具 " + call.name + " 属于高风险操作，需要用户审批。");
+      const reason = approvalReasonForCall(call);
+      const approvalId = createApprovalFor(input.context, toolCallId, call.name, reason);
       input.context.emit({
         type: "approval_requested",
         approvalId,
         toolCallId,
         toolName: call.name,
-        reason: "工具 " + call.name + " 属于高风险操作，需要用户审批后重试。",
+        reason,
       });
       await waitForApproval(approvalId, input.context.signal);
     }
@@ -1362,6 +1375,25 @@ function summarizeArgs(call: ToolCall): string {
     return call.rawArguments.slice(0, 160);
   }
 }
+
+/** Human-readable approval purpose: what the tool will do and with which arguments. */
+function approvalReasonForCall(call: ToolCall): string {
+  const purpose =
+    APPROVAL_PURPOSE_LABELS[call.name] ??
+    "该操作会修改或删除数据，且属于高风险工具";
+  const args = summarizeArgs(call);
+  return (
+    purpose +
+    "，需要你确认是否执行。" +
+    (args ? " 调用参数：" + args : "")
+  ).slice(0, 400);
+}
+
+const APPROVAL_PURPOSE_LABELS: Record<string, string> = {
+  fs_delete: "将从工作区删除文件或目录",
+  delete_record: "将删除应用中的一条业务数据",
+  restore_checkpoint: "将把工作区回滚到指定检查点，当前代码可能被覆盖",
+};
 
 function summarizeResult(toolName: string, result: unknown): string {
   const record = (

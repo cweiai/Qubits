@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { runToolCallingAgent, readMaxToolFailures, ToolLoopError } from "@/lib/ai/tool-loop";
@@ -92,6 +92,7 @@ function failingProvider(seen: ChatMessage[][]): AIProvider {
 describe("工具失败阈值", () => {
   afterEach(() => {
     delete process.env.QUIBITS_MAX_TOOL_FAILURES;
+    delete process.env.QUIBITS_MAX_TOOL_FAILURES_TOTAL;
   });
 
   it("失败结果与报错注入上下文（后续请求包含改正指令）", async () => {
@@ -122,6 +123,48 @@ describe("工具失败阈值", () => {
     expect(events.filter((e) => e.type === "tool_result" && e.ok === false).length).toBeGreaterThanOrEqual(3);
     // Stopping emits an error event.
     expect(events.some((e) => e.type === "error" && e.code === "TOOL_FAILURE_LIMIT_EXCEEDED")).toBe(true);
+  });
+
+  it("PATCH_NO_MATCH 不消耗累计失败上限（陈旧 oldText 可纠正）", async () => {
+    process.env.QUIBITS_MAX_TOOL_FAILURES_TOTAL = "1";
+    const events: AgentEvent[] = [];
+    const context = makeContext(events);
+    writeFileSync(path.join(FAIL_WORKSPACE, "soft-fail.txt"), "current content\n");
+    let calls = 0;
+    const provider: AIProvider = {
+      kind: "mock",
+      async generateWithTools(): Promise<AgentTurnResponse> {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            content: null,
+            toolCalls: [{ id: "tc-patch", name: "fs_patch", rawArguments: JSON.stringify({ path: "soft-fail.txt", oldText: "stale text", newText: "fixed", replaceAll: false }) }],
+            reasoningContent: null,
+          };
+        }
+        if (calls === 2) {
+          // A successful read resets the consecutive-failure counter.
+          return {
+            content: null,
+            toolCalls: [{ id: "tc-read", name: "fs_read", rawArguments: JSON.stringify({ path: "soft-fail.txt", maxBytes: 100 }) }],
+            reasoningContent: null,
+          };
+        }
+        return { content: blueprintJson(), toolCalls: [], reasoningContent: null };
+      },
+    };
+    const result = await runToolCallingAgent({
+      roleId: "engineer",
+      agentRunId: "agent-test-000000000003",
+      systemPrompt: "测试",
+      taskPrompt: "可恢复的 patch 失败",
+      finalSchema: appBlueprintWithSummarySchema,
+      context,
+      requireToolCall: true,
+      providerOverride: provider,
+    });
+    expect(result.status).toBe("completed");
+    expect(events.some((e) => e.type === "error" && e.code === "TOOL_FAILURE_LIMIT_EXCEEDED")).toBe(false);
   });
 
   it("env 阈值解析：缺省 3、非法回退 3、可配置", () => {

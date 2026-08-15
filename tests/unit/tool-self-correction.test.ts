@@ -237,7 +237,13 @@ describe("工具失败后的自我纠错", () => {
       },
     });
     expect(result.status).toBe("completed");
-    expect(events.some((event) => event.type === "approval_requested")).toBe(true);
+    const approval = events.find((event) => event.type === "approval_requested");
+    expect(approval).toBeTruthy();
+    if (approval?.type === "approval_requested") {
+      expect(approval.reason).toContain("删除文件或目录");
+      expect(approval.reason).toContain("src/a.txt");
+      expect(approval.reason).toContain("soft=true");
+    }
     expect(events.some((event) => event.type === "tool_result" && event.toolName === "fs_delete" && event.ok)).toBe(true);
     writeFileSync(path.join(WORKSPACE, "src", "a.txt"), "hello qubits");
   });
