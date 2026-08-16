@@ -56,8 +56,8 @@ function makeContext(overrides: Partial<ToolExecutionContext> = {}): ToolExecuti
   };
 }
 
-describe("迈克主编排（mock provider）", () => {
-  it("第一条事件必须是迈克的 agent_started，且完整闭环事件真实存在", async () => {
+describe("Mike 主编排（mock provider）", () => {
+  it("第一条事件必须是 Mike 的 agent_started，且完整闭环事件真实存在", async () => {
     const wsDir = repoWorkspaceDir();
     const events: AgentEvent[] = [];
     try {
@@ -290,7 +290,7 @@ describe("Tool Calling 消息批次", () => {
 });
 
 describe("工具权限与门控（真实执行器）", () => {
-  it("非迈克角色调用 delegate_to_agent 被拒绝", async () => {
+  it("非 Mike 角色调用 delegate_to_agent 被拒绝", async () => {
     await expect(
       delegateToAgentTool.execute(
         { targetRole: "engineer", task: "x", expectedOutput: "code_workspace", inputArtifactIds: [] },

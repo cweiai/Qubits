@@ -67,7 +67,7 @@ describe("Registry 与权限", () => {
     }
   });
 
-  it("能力矩阵：只有迈克能委派，只有亚历克斯能修改和验证工作区", () => {
+  it("能力矩阵：只有 Mike 能委派，只有 Alex 能修改和验证工作区", () => {
     expect(getToolNamesForRole("team_leader")).toContain("delegate_to_agent");
     expect(getToolNamesForRole("product_manager")).not.toContain("delegate_to_agent");
     expect(getToolNamesForRole("product_manager")).not.toContain("fs_write");

@@ -113,17 +113,17 @@ const STATUS_TONE: Record<StageProgressStatus, string> = {
 };
 
 const PENDING_SUMMARIES: Record<ToolStage, string> = {
-  planning: "等待迈克完成需求理解与团队分工。",
-  coding: "等待亚历克斯将产品简报落成真实代码。",
+  planning: "等待 Mike 完成需求理解与团队分工。",
+  coding: "等待 Alex 将产品简报落成真实代码。",
   validating: "等待 Lint、类型检查、测试、构建与安全扫描。",
   previewing: "等待通过门禁的构建产物提交预览。",
 };
 
 const RUNNING_SUMMARIES: Record<ToolStage, string> = {
-  planning: "迈克正在理解需求并安排最少必要的团队协作。",
-  coding: "亚历克斯正在把产品简报拆成真实的工作区文件，并逐步实现交互。",
-  validating: "亚历克斯正在对最新工作区运行 Lint、类型检查、测试、构建和安全扫描。",
-  previewing: "迈克正在提交已通过工程门禁的预览并准备完成本轮运行。",
+  planning: "Mike 正在理解需求并安排最少必要的团队协作。",
+  coding: "Alex 正在把产品简报拆成真实的工作区文件，并逐步实现交互。",
+  validating: "Alex 正在对最新工作区运行 Lint、类型检查、测试、构建和安全扫描。",
+  previewing: "Mike 正在提交已通过工程门禁的预览并准备完成本轮运行。",
 };
 
 const COMPLETED_SUMMARIES: Record<ToolStage, string> = {

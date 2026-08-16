@@ -49,7 +49,7 @@ export function ConversationPanel() {
         ))}
         {!state.messagesLoading && state.messages.length === 0 ? (
           <p className="py-6 text-center text-xs text-muted-foreground">
-            这是新的对话线程。描述你想要的应用，迈克会协调艾玛和亚历克斯完成生成。
+            这是新的对话线程。描述你想要的应用，Mike 会协调 Emma 和 Alex 完成生成。
           </p>
         ) : null}
       </div>

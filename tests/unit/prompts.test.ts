@@ -16,15 +16,15 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 describe("Agent Tool Calling 提示词注入", () => {
-  it("迈克是唯一 root Agent 且必须通过真实工具完成编排", () => {
+  it("Mike 是唯一 root Agent 且必须通过真实工具完成编排", () => {
     const prompt = ROLE_DEFINITIONS.team_leader.systemPrompt;
-    expect(prompt).toContain("迈克");
+    expect(prompt).toContain("Mike");
     expect(prompt).toContain("delegate_to_agent");
     expect(prompt).toContain("render_preview");
     expect(prompt).toContain("complete_run");
     expect(prompt).toContain("explicit tool-calling protocol");
     expect(prompt).toContain("团队固定只有三人");
-    expect(prompt).toContain("不得跳过艾玛");
+    expect(prompt).toContain("不得跳过 Emma");
   });
 
   it("子 Agent 提示词包含工具规则且不得自行分配 Agent", () => {
@@ -58,7 +58,7 @@ describe("Agent Tool Calling 提示词注入", () => {
     expect(ROLE_DEFINITIONS.team_leader.systemPrompt).toContain("禁止引用或尝试委派其他角色");
   });
 
-  it("工具权限 allowlist：非迈克角色不能 delegate/render/complete", () => {
+  it("工具权限 allowlist：非 Mike 角色不能 delegate/render/complete", () => {
     expect(ROLE_DEFINITIONS.product_manager.tools).not.toContain("delegate_to_agent");
     expect(ROLE_DEFINITIONS.engineer.tools).not.toContain("render_preview");
     expect(ROLE_DEFINITIONS.team_leader.tools).toContain("delegate_to_agent");

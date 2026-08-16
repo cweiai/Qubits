@@ -115,7 +115,7 @@ function EmptyPreview() {
       <div>
         <p className="text-sm font-medium">还没有应用</p>
         <p className="mt-1 max-w-[280px] text-xs leading-relaxed text-muted-foreground">
-          在左侧描述你的需求，迈克会协调艾玛和亚历克斯：真实编写 React/TypeScript 代码，在隔离沙盒中构建、测试、安全扫描并预览。
+          在左侧描述你的需求，Mike 会协调 Emma 和 Alex：真实编写 React/TypeScript 代码，在隔离沙盒中构建、测试、安全扫描并预览。
         </p>
       </div>
     </div>

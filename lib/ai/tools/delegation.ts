@@ -20,7 +20,7 @@ const ROLE_OUTPUT_MAP: Record<string, string> = {
 export const delegateToAgentTool: ServerToolDefinition<z.infer<typeof delegateToAgentArgsSchema>, z.infer<typeof delegateToAgentResultSchema>> = {
   name: "delegate_to_agent",
   description:
-    "把任务分配给子 Agent（艾玛或亚历克斯）并等待其真实完成。子 Agent 通过自己的系统提示词与工具集合执行，结果以结构化产物返回。只有迈克可以调用。",
+    "把任务分配给子 Agent（Emma 或 Alex）并等待其真实完成。子 Agent 通过自己的系统提示词与工具集合执行，结果以结构化产物返回。只有 Mike 可以调用。",
   argsSchema: delegateToAgentArgsSchema,
   resultSchema: delegateToAgentResultSchema,
   allowedRoles: ["team_leader"],
@@ -28,7 +28,7 @@ export const delegateToAgentTool: ServerToolDefinition<z.infer<typeof delegateTo
   requiresApproval: false,
   async execute(args, context) {
     if (context.roleId !== "team_leader") {
-      throw new SearchProviderError("FORBIDDEN_ROLE", "只有团队领队（迈克）可以委派子 Agent");
+      throw new SearchProviderError("FORBIDDEN_ROLE", "只有团队领队（Mike）可以委派子 Agent");
     }
     if (!DELEGATABLE_ROLES.includes(args.targetRole)) {
       throw new SearchProviderError("INVALID_ARGS", "目标角色不在委派 allowlist 中");

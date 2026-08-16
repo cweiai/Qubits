@@ -28,7 +28,7 @@ export const renderPreviewTool: ServerToolDefinition<z.infer<typeof renderPrevie
   requiresApproval: false,
   async execute(args, context) {
     if (context.roleId !== "team_leader") {
-      throw new SearchProviderError("FORBIDDEN_ROLE", "只有迈克可以提交预览");
+      throw new SearchProviderError("FORBIDDEN_ROLE", "只有 Mike 可以提交预览");
     }
     if (!context.workspaceReady) {
       throw new WorkspaceError("WORKSPACE_NOT_INITIALIZED", "工作区尚未初始化，无法提交预览", false);
@@ -83,7 +83,7 @@ export const completeRunTool: ServerToolDefinition<z.infer<typeof completeRunArg
   requiresApproval: false,
   async execute(args, context) {
     if (context.roleId !== "team_leader") {
-      throw new SearchProviderError("FORBIDDEN_ROLE", "只有迈克可以结束运行");
+      throw new SearchProviderError("FORBIDDEN_ROLE", "只有 Mike 可以结束运行");
     }
     if (!context.artifacts.findLatest("product_brief")) {
       throw new SearchProviderError("MISSING_ARTIFACT", "缺少 ProductBrief，不能完成运行");

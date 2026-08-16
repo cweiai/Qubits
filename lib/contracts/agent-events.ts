@@ -16,25 +16,25 @@ export const roleIdSchema = z.enum([
 ]);
 export type RoleId = z.infer<typeof roleIdSchema>;
 
-/** Display mapping: Chinese display names (role ids stay English for protocol compatibility). */
+/** Display mapping: English display names (role ids stay English for protocol compatibility). */
 export const ROLE_META: Record<RoleId, { id: RoleId; name: string; title: string; responsibility: string; accent: string; internal?: boolean }> = {
   team_leader: {
     id: "team_leader",
-    name: "迈克",
+    name: "Mike",
     title: "团队领队",
     responsibility: "协调用户需求，把任务分配给最合适的团队成员",
     accent: "bg-sky-600",
   },
   product_manager: {
     id: "product_manager",
-    name: "艾玛",
+    name: "Emma",
     title: "产品经理",
     responsibility: "把愿景转化为 PRD、用户旅程、目标与优先级",
     accent: "bg-violet-500",
   },
   engineer: {
     id: "engineer",
-    name: "亚历克斯",
+    name: "Alex",
     title: "工程师",
     responsibility: "通过 workspace 工具编写真实 React/TypeScript 代码并构建验证",
     accent: "bg-emerald-500",

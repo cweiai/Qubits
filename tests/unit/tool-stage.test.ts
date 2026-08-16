@@ -25,18 +25,18 @@ function event(roleId: ToolEventView["roleId"], toolName: string): Pick<ToolEven
 }
 
 describe("toolEventStage 阶段映射", () => {
-  it("迈克的委派/搜索属于规划；render_preview/complete_run 属于预览提交", () => {
+  it("Mike 的委派/搜索属于规划；render_preview/complete_run 属于预览提交", () => {
     expect(toolEventStage(event("team_leader", "delegate_to_agent"))).toBe("planning");
     expect(toolEventStage(event("team_leader", "search_references"))).toBe("planning");
     expect(toolEventStage(event("team_leader", "render_preview"))).toBe("previewing");
     expect(toolEventStage(event("team_leader", "complete_run"))).toBe("previewing");
   });
 
-  it("艾玛的工具属于规划", () => {
+  it("Emma 的工具属于规划", () => {
     expect(toolEventStage(event("product_manager", "inspect_current_app"))).toBe("planning");
   });
 
-  it("亚历克斯的写文件属于编写代码；lint/typecheck/tests/build 属于构建验证", () => {
+  it("Alex 的写文件属于编写代码；lint/typecheck/tests/build 属于构建验证", () => {
     expect(toolEventStage(event("engineer", "fs_write"))).toBe("coding");
     expect(toolEventStage(event("engineer", "workspace_init"))).toBe("coding");
     expect(toolEventStage(event("engineer", "dependency_add"))).toBe("coding");
