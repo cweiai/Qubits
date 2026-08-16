@@ -1,9 +1,67 @@
 # Qubits
 
-Multi-agent conversational web-app generator (Next.js + React/TypeScript). Mike's team
-(迈克/艾玛/艾瑞斯/鲍勃/亚历克斯/大卫/评审员) writes real React/TS code in an isolated
-workspace, builds it, reviews it and publishes a live preview — all through real tool
-calls.
+A conversational web-app generator: describe an app in one sentence and a multi-agent
+team (Mike, Emma, Iris, Bob, Alex, David, Reviewer) turns it into a real, working
+React/TypeScript application — writing actual code in an isolated workspace, building
+it, testing and reviewing it, and shipping a live preview, all through real tool calls.
+One click deploys the current build to a shareable public URL inside its own container.
+
+## Quick start
+
+Prerequisites: Node.js ≥ 22 (uses `node:sqlite`), a running Docker daemon, and an
+OpenAI-compatible API key. `cloudflared` is downloaded automatically on first deploy
+(no account needed).
+
+```bash
+cp .env.example .env    # set OPENAI_API_KEY (and OPENAI_BASE_URL if not api.openai.com)
+npm install
+bash scripts/build-toolchain-image.sh   # one-time; use NPM_REGISTRY=https://registry.npmmirror.com on CN networks
+npm run dev             # http://localhost:3000
+```
+
+Open the workspace, describe your app in the left panel (e.g. “a task manager with
+due dates”), and the agent team generates, builds and previews it on the right.
+
+## One-click deploy
+
+With a built app in the preview panel, hit the **一键上线 (Deploy)** button in the
+preview toolbar to publish the current build:
+
+- **Containerized**: each deployment runs in its own hardened Docker container
+  (`qubits-deploy-web:latest`, node:24-alpine + a tiny dependency-free static server,
+  built automatically on first use). Hardening matches the workspace sandbox:
+  `cap-drop ALL`, `no-new-privileges`, read-only root, non-root user, memory/cpu/pid
+  limits, ports published on `127.0.0.1` only.
+- **Public tunnel**: a deploy router (`127.0.0.1:3100`, path `/d/<deploymentId>/` plus
+  subdomain routing) is exposed through a Cloudflare Quick Tunnel — free, no account,
+  random `*.trycloudflare.com` hostname. Missing `cloudflared` binaries are
+  auto-downloaded into `bin/cloudflared` (or set `DEPLOY_TUNNEL_BINARY`).
+- **Data still persists**: the served bundle embeds a host bridge speaking the exact
+  MessageChannel handshake protocol of the sandboxed preview; data requests flow back
+  through `POST /api/deploy/data` to the Qubits backend with server-side re-validation
+  of collections, operations, queries and payloads. Everyone opening one link shares
+  one dataset.
+- **Lifecycle**: links are temporary (default 12 h, `DEPLOY_TTL_HOURS`), expire and
+  stop automatically, and can be taken down manually. One live deployment per
+  conversation. Restarting the Qubits server invalidates old links (the random
+  hostname is re-issued with the tunnel) — deploy again to get a fresh one. History
+  lives in the `deployments` table.
+- **Opt-outs**: `DEPLOY_ENABLED=0` disables the feature; `DEPLOY_PUBLIC_TUNNEL=0`
+  serves local links only. Offline image builds: pre-pull and tag
+  `docker.m.daocloud.io/library/node:24-alpine` as `node:24-alpine`.
+
+## How it works
+
+- The agent team writes real React/TypeScript code in a per-task workspace
+  (`data/workspaces/<taskId>`); the server-owned esbuild/postcss pipeline bundles it
+  into a single self-contained HTML document — no npm install, no lifecycle scripts,
+  no network during builds.
+- The preview runs inside a `sandbox="allow-scripts"` iframe with a strict CSP; all
+  app data flows through the Qubits SDK over a MessageChannel to the sandbox data API,
+  re-validated server-side on every request.
+- Versioning is fail-safe: only fully built, tested, reviewed and rendered runs are
+  promoted to an immutable snapshot; failed attempts never overwrite the last working
+  version.
 
 ## Sandbox (security model)
 
@@ -18,64 +76,20 @@ execution mode and no fallback:
   **only** the canonicalized (symlink-free) workspace at `/workspace`.
 - Docker or image unavailable → `PROVIDER_UNAVAILABLE`, fail closed. Never host execution.
 
-Agent file access goes through the unified jail in `lib/workspace/paths.ts`:
-
-- rejects absolute paths, Windows/mixed separators, NUL, empty/overlong paths and every
-  `..` segment;
-- walks every path segment with `lstatSync` — intermediate or final symlinks and special
-  files (socket/FIFO/device) are rejected (`PATH_ESCAPE`);
-- reads/writes open with `O_NOFOLLOW`;
-- a per-workspace async mutex serializes agent fs tools, container exec, build, format,
-  snapshot and checkpoint (TOCTOU guard);
-- after every `bash` call the tree is re-scanned; a planted symlink/special file marks
-  the task `SECURITY_BLOCKED` and blocks all reads, builds, previews and snapshots.
-
-### Toolchain image
-
-The workspace check runner (typecheck/lint/tests) executes inside the container using
-the `qubits-toolchain:latest` image (node + pinned typescript/eslint/vitest with
-linux-native binaries). Build it once per machine:
-
-```bash
-bash scripts/build-toolchain-image.sh   # NPM_REGISTRY=https://registry.npmmirror.com on CN networks
-```
-
-The host's `node_modules` (types only) and the system-maintained ESLint/Vitest configs
-are mounted read-only into the container.
-
-## 一键上线（One-click deploy）
-
-每个对话的当前构建产物都可以一键部署到公网临时链接（预览工具栏「一键上线」按钮）：
-
-- **容器化**：每次部署生成一个独立 Docker 容器（`qubits-deploy-web:latest`，
-  基于 node:24-alpine + 内置零依赖静态服务器，首次部署时自动构建；离线环境可先
-  `docker pull docker.m.daocloud.io/library/node:24-alpine` 并 tag 为 `node:24-alpine`）。
-  容器与工作区沙盒同等级加固：
-  `cap-drop ALL`、`no-new-privileges`、只读根、非 root、内存/CPU/pid 限额，端口只发布在
-  `127.0.0.1`。
-- **公网隧道**：部署路由器（`127.0.0.1:3100`，路径 `/d/<deploymentId>/` + 子域路由）
-  通过 Cloudflare Quick Tunnel 暴露到公网 —— 免费、无需账号，自动分配随机
-  `*.trycloudflare.com` 域名。`cloudflared` 缺失时自动下载到 `bin/cloudflared`
-  （或 `brew install cloudflared` 手动安装；`DEPLOY_TUNNEL_BINARY` 可指定路径）。
-- **数据仍然入库**：部署包在构建产物里注入嵌入式宿主桥（与预览完全相同的
-  MessageChannel 握手协议），数据请求经 `/api/deploy/data` 公开接口走回 Qubits 后端，
-  服务端重新校验集合/操作/查询/载荷；打开同一链接的访问者共享同一份数据。
-- **生命周期**：链接为临时地址（默认 12 小时，`DEPLOY_TTL_HOURS` 可调），到期自动下线；
-  可手动「下线」；同一对话同一时间只有一个在线部署；Qubits 服务重启后所有旧链接失效
-  （随机域名随隧道重建），需重新上线。历史与状态持久化在 `deployments` 表。
-- **禁用**：`DEPLOY_ENABLED=0` 关闭整个功能；`DEPLOY_PUBLIC_TUNNEL=0` 只提供本地链接。
+Agent file access goes through the unified jail in `lib/workspace/paths.ts`: absolute
+paths, `..` segments, symlinks and special files are rejected, reads/writes open with
+`O_NOFOLLOW`, a per-workspace mutex serializes all fs/container access, and a planted
+symlink blocks the task (`SECURITY_BLOCKED`) before anything runs.
 
 ## Development
 
 ```bash
-npm install
-bash scripts/build-toolchain-image.sh
-npm run dev        # http://localhost:3000
 npm run lint
 npm run typecheck
-npm test           # unit tests (Docker-dependent ones skip automatically without a daemon)
+npm test           # unit tests (Docker-dependent ones skip without a daemon)
 npm run test:e2e   # requires a running Docker daemon
 ```
 
-Database: SQLite via `node:sqlite` (`data/qubits.db`), workspaces under
-`data/workspaces/<taskId>`, immutable snapshots under `data/snapshots/`.
+Database: SQLite via `node:sqlite` (`data/qubits.db`); workspaces under
+`data/workspaces/<taskId>`; immutable snapshots under `data/snapshots/`. Configuration
+lives in `.env` — see `.env.example` for sandbox, model and deploy options.
