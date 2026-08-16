@@ -132,6 +132,21 @@ function publicTunnelDisabled(): boolean {
 }
 
 /**
+ * Reconcile deployments left "live" by a previous server session. The startup sweep
+ * runs when the runtime is first initialized (first deploy); this wrapper lets the
+ * read-only list endpoint run the same housekeeping once when the runtime has not
+ * started yet, so stale rows never render as reachable links.
+ */
+export function reconcileStaleDeployments(): void {
+  if (runtime().state !== "stopped") return;
+  try {
+    cleanupStaleDeployments();
+  } catch {
+    // Housekeeping must never break the listing endpoint.
+  }
+}
+
+/**
  * Startup sweep: previous server sessions left containers behind (and their tunnel
  * hostname is dead), so every still-live deployment row is expired and every leftover
  * container is removed. Deployments are session-scoped by design.

@@ -6,7 +6,7 @@ import { apiErrorResponse, ApiError } from "@/lib/server/api-response";
 import { newProjectId, newRequestId, readProjectId } from "@/lib/sandbox/server-session";
 import { qubitsManifestSchema } from "@/lib/contracts/manifest";
 import { DeployError } from "@/lib/deploy/errors";
-import { deployConversationApp, deploymentPublicUrl, getDeployRuntimeStatus } from "@/lib/deploy/manager";
+import { deployConversationApp, deploymentPublicUrl, getDeployRuntimeStatus, reconcileStaleDeployments } from "@/lib/deploy/manager";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,6 +52,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     if (!conversation || conversation.projectId !== projectId) {
       throw new ApiError("CONVERSATION_NOT_FOUND", "对话不存在", 404);
     }
+    // Previous server sessions left "live" rows whose tunnel hostnames are dead:
+    // expire them once before listing so the UI never shows unreachable links.
+    reconcileStaleDeployments();
     return NextResponse.json({
       ok: true,
       data: {
