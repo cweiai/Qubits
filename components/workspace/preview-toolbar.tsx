@@ -67,15 +67,15 @@ export function PreviewToolbar() {
       </button>
       <button
         type="button"
-        aria-label="一键上线"
-        title={hasPreview ? "一键上线：部署到容器并生成公网临时链接" : "当前对话还没有可上线的应用"}
+        aria-label="一键发布"
+        title={hasPreview ? "一键发布：生成可分享的临时链接" : "当前对话还没有可发布的应用"}
         data-testid="deploy-open"
         disabled={!hasPreview}
         onClick={() => setDeployOpen(true)}
         className="flex h-8 items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-2.5 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Rocket className="h-3.5 w-3.5" />
-        一键上线
+        一键发布
       </button>
       <DeployDialog
         open={deployOpen}
