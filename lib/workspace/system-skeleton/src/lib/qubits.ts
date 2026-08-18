@@ -364,6 +364,18 @@ declare global {
 installPostMessageGuard();
 window.Qubits = qubits;
 window.addEventListener("message", onWindowMessage);
-sendWindow({ type: "QUBITS_HANDSHAKE" });
+
+// Retry the window-level handshake a few times in case the host missed the first one
+// (opaque-origin iframe load races are common in production).
+let handshakeAttempts = 0;
+const MAX_HANDSHAKE_ATTEMPTS = 5;
+const HANDSHAKE_RETRY_MS = 600;
+function sendHandshake(): void {
+  if (port || handshakeAttempts >= MAX_HANDSHAKE_ATTEMPTS) return;
+  handshakeAttempts++;
+  sendWindow({ type: "QUBITS_HANDSHAKE" });
+  window.setTimeout(sendHandshake, HANDSHAKE_RETRY_MS);
+}
+sendHandshake();
 
 export default qubits;

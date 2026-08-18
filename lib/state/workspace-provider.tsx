@@ -16,6 +16,7 @@ import type { RoleId } from "@/lib/contracts/agent-events";
 import { ROLE_META } from "@/lib/contracts/agent-events";
 import type { PipelineStage } from "@/lib/contracts/conversation";
 import { newId } from "@/lib/app/records";
+import { randomUUID } from "@/lib/utils/random-uuid";
 import {
   clearLegacyProjectState,
   loadLegacyProjectState,
@@ -191,7 +192,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         let target = urlId && conversations.some((c) => c.id === urlId) ? urlId : null;
         if (!target) target = active[0]?.id ?? null;
         if (!target) {
-          const created = await api.createConversation("conv-" + crypto.randomUUID());
+          const created = await api.createConversation("conv-" + randomUUID());
           target = created.conversation.id;
           dispatch({ type: "add-conversation", conversation: created.conversation });
         }
@@ -239,7 +240,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
 
   const createConversation = useCallback(async () => {
     try {
-      const created = await api.createConversation("conv-" + crypto.randomUUID());
+      const created = await api.createConversation("conv-" + randomUUID());
       dispatch({ type: "add-conversation", conversation: created.conversation });
       switchConversation(created.conversation.id);
     } catch (error) {

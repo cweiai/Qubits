@@ -6,6 +6,7 @@ import type { QubitsManifest } from "@/lib/contracts/manifest";
 import type { CollectionSpec } from "@/lib/contracts/app-spec";
 import { SandboxHostBridge } from "@/lib/sandbox/runtime-bridge";
 import { cn } from "@/lib/utils";
+import { randomUUID } from "@/lib/utils/random-uuid";
 
 /**
  * Renders the REAL built preview bundle inside a sandboxed iframe
@@ -92,7 +93,7 @@ export function SandboxPreview({
           return;
         }
         if (cancelled) return;
-        nonceRef.current = crypto.randomUUID();
+        nonceRef.current = randomUUID();
         setSession({
           sessionId: body.data.sessionId,
           appId: body.data.appId,

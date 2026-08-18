@@ -27,7 +27,7 @@ export class SandboxHostBridge {
   private port: MessagePort | null = null;
   private pending = new Map<string, { timer: ReturnType<typeof setTimeout>; controller: AbortController }>();
   private disposed = false;
-  private initiated = false;
+  private ready = false;
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
@@ -69,10 +69,9 @@ export class SandboxHostBridge {
     this.port = null;
   }
 
-  /** Host-initiated handshake (fallback after iframe load; mutually exclusive with the iframe handshake, first wins). */
+  /** Host-initiated handshake (fallback after iframe load). */
   initiate(): void {
-    if (this.disposed || this.initiated) return;
-    this.initiated = true;
+    if (this.disposed || this.ready || this.port) return;
     this.openChannel();
   }
 
@@ -81,10 +80,25 @@ export class SandboxHostBridge {
     if (event.source !== this.iframe.contentWindow) return;
     const message = sandboxHandshakeSchema.safeParse(event.data);
     if (!message.success) return;
-    if (this.initiated) return; // Already initiated by the host
-    this.initiated = true;
+    if (this.ready) return; // Already connected
+    // If the host already initiated a channel but the SDK missed it (race in opaque-origin iframe),
+    // respond to the SDK's handshake by opening a fresh channel.
+    this.resetChannel();
     this.openChannel();
   };
+
+  private resetChannel(): void {
+    if (this.handshakeTimer) {
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
+    }
+    try {
+      this.port?.close();
+    } catch {
+      // port may already be closed
+    }
+    this.port = null;
+  }
 
   private openChannel(): void {
     const channel = new MessageChannel();
@@ -141,6 +155,7 @@ export class SandboxHostBridge {
       case "QUBITS_READY": {
         if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
         this.handshakeTimer = null;
+        this.ready = true;
         this.options.onStatusChange?.("ready");
         this.sendToPort({
           type: "QUBITS_SPEC",
