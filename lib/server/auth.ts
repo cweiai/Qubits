@@ -77,20 +77,27 @@ export function createSession(repo: AppRepository, userId: string): string {
   return id;
 }
 
-export function attachAuthCookie(response: NextResponse, sessionId: string): void {
+/** Whether the client reached us over HTTPS (directly or via a reverse proxy). */
+export function isSecureRequest(request: NextRequest): boolean {
+  const forwarded = request.headers.get("x-forwarded-proto");
+  if (forwarded) return forwarded.split(",")[0].trim().toLowerCase() === "https";
+  return request.nextUrl.protocol === "https:";
+}
+
+export function attachAuthCookie(request: NextRequest, response: NextResponse, sessionId: string): void {
   response.cookies.set({
     name: AUTH_COOKIE,
     value: sessionId,
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: isSecureRequest(request),
     path: "/",
     maxAge: SESSION_TTL_MS / 1000,
   });
 }
 
-export function clearAuthCookie(response: NextResponse): void {
-  response.cookies.set({ name: AUTH_COOKIE, value: "", httpOnly: true, sameSite: "lax", path: "/", maxAge: 0 });
+export function clearAuthCookie(request: NextRequest, response: NextResponse): void {
+  response.cookies.set({ name: AUTH_COOKIE, value: "", httpOnly: true, sameSite: "lax", secure: isSecureRequest(request), path: "/", maxAge: 0 });
 }
 
 export function deleteCurrentSession(request: NextRequest, repo: AppRepository): void {

@@ -32,8 +32,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       repo.setProjectUser(projectId, user.id);
     }
     const response = NextResponse.json({ ok: true, data: { user: { id: user.id, email: user.email, createdAt: user.createdAt } } });
-    attachAuthCookie(response, createSession(repo, user.id));
-    attachProjectCookie(response, projectId);
+    attachAuthCookie(request, response, createSession(repo, user.id));
+    attachProjectCookie(request, response, projectId);
     return response;
   } catch (error) {
     return apiErrorResponse(error, requestId);

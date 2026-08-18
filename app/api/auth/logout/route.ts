@@ -10,7 +10,7 @@ export function POST(request: NextRequest): NextResponse {
   const repo = getRepository();
   deleteCurrentSession(request, repo);
   const response = NextResponse.json({ ok: true, data: { loggedOut: true } });
-  clearAuthCookie(response);
-  clearProjectCookie(response);
+  clearAuthCookie(request, response);
+  clearProjectCookie(request, response);
   return response;
 }

@@ -61,7 +61,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         updatedAt: project?.updatedAt ?? null,
       },
     });
-    attachProjectCookie(response, projectId);
+    attachProjectCookie(request, response, projectId);
     return response;
   } catch (error) {
     return apiErrorResponse(error, requestId);
@@ -173,7 +173,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       ok: true,
       data: { migrated: true, projectId, conversationId, migratedMessages },
     });
-    attachProjectCookie(response, projectId);
+    attachProjectCookie(request, response, projectId);
     return response;
   } catch (error) {
     return apiErrorResponse(error, requestId);

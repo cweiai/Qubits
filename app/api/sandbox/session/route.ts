@@ -85,7 +85,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       },
     });
     // Idempotent renewal: always write the project cookie with the final response
-    attachProjectCookie(response, projectId);
+    attachProjectCookie(request, response, projectId);
     return response;
   } catch (error) {
     return sandboxErrorResponse(error, requestId);

@@ -35,7 +35,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       };
     });
     const response = NextResponse.json({ ok: true, data: { conversations } });
-    attachProjectCookie(response, projectId);
+    attachProjectCookie(request, response, projectId);
     return response;
   } catch (error) {
     return apiErrorResponse(error, requestId);
@@ -63,7 +63,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         ok: true,
         data: { conversation: toConversationJson(existing), created: false },
       });
-      attachProjectCookie(response, projectId);
+      attachProjectCookie(request, response, projectId);
       return response;
     }
     const conversation = repo.insertConversation({
@@ -78,7 +78,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       ok: true,
       data: { conversation: toConversationJson(repo.getConversation(conversation.id)!), created: true },
     });
-    attachProjectCookie(response, projectId);
+    attachProjectCookie(request, response, projectId);
     return response;
   } catch (error) {
     return apiErrorResponse(error, requestId);

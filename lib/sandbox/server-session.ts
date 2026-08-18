@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { SandboxError } from "@/lib/db/sandbox-data";
 import type { AppRepository } from "@/lib/db/repository";
 import { ApiError } from "@/lib/server/api-response";
-import { requireAuthUser } from "@/lib/server/auth";
+import { requireAuthUser, isSecureRequest } from "@/lib/server/auth";
 
 /** Resolves project scope from authentication and server-owned cookies. */
 
@@ -34,25 +34,25 @@ export function resolveProjectId(request: NextRequest, repo: AppRepository): str
 }
 
 /** (Re)writes the project cookie on the response: idempotent renewal, always returned with the final response. */
-export function attachProjectCookie(response: NextResponse, projectId: string): void {
+export function attachProjectCookie(request: NextRequest, response: NextResponse, projectId: string): void {
   response.cookies.set({
     name: PROJECT_COOKIE,
     value: projectId,
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: isSecureRequest(request),
     path: "/",
     maxAge: COOKIE_MAX_AGE,
   });
 }
 
-export function clearProjectCookie(response: NextResponse): void {
+export function clearProjectCookie(request: NextRequest, response: NextResponse): void {
   response.cookies.set({
     name: PROJECT_COOKIE,
     value: "",
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: isSecureRequest(request),
     path: "/",
     maxAge: 0,
   });
