@@ -31,6 +31,9 @@ export const PREVIEW_HTML_NAME = "index.html";
 export const PREVIEW_JS_NAME = "app.js";
 export const PREVIEW_CSS_NAME = "app.css";
 
+/** Trusted SDK inside every workspace: performs the sandbox data-channel handshake. */
+const SDK_ENTRY = "src/lib/qubits.ts";
+
 const MAX_PREVIEW_BUNDLE_BYTES = 2_500_000;
 const MAX_JS_BYTES = 2_000_000;
 const MAX_CSS_BYTES = 300_000;
@@ -168,16 +171,22 @@ async function buildAppLocked(workspaceDir: string): Promise<BuildAppResult> {
     log.push("dependency_check: pass");
 
     // 3) esbuild bundle (system config; generated code cannot override it).
+    // The trusted SDK (src/lib/qubits.ts) is injected via a virtual entry so the data
+    // channel handshake is always present, even when the generated app entry forgets
+    // to import it (the module is a singleton, so an explicit app import is deduped).
     const entry = safeResolveWorkspacePath(workspaceDir, MANIFEST_MAIN);
     const entryAbs = entry.resolved;
     if (!existsSync(entryAbs) || !lstatSync(entryAbs).isFile()) {
       return fail("BUILD_FAILED", "构建入口缺失或不是普通文件：" + MANIFEST_MAIN);
     }
+    const sdkAbs = safeResolveWorkspacePath(workspaceDir, SDK_ENTRY).resolved;
+    const hasSdk = existsSync(sdkAbs) && lstatSync(sdkAbs).isFile();
+    const entrySource = (hasSdk ? 'import "./' + SDK_ENTRY + '";\n' : "") + 'import "./' + MANIFEST_MAIN + '";\n';
     const { plugin, cssFiles } = makeCssCollector();
     let bundle: { outputFiles: Array<{ text: string }> };
     try {
       bundle = await esbuildBuild({
-        entryPoints: [entryAbs],
+        stdin: { contents: entrySource, resolveDir: workspaceDir, loader: "ts" },
         bundle: true,
         minify: true,
         format: "iife",

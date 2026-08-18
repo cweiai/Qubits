@@ -126,6 +126,21 @@ describe("工作区初始化（系统骨架，无模板）", () => {
     expect(result.bundle).toBeNull();
   });
 
+  it("入口未显式引入 SDK 时构建仍注入数据通道 SDK", async () => {
+    const dir = makeWorkspace();
+    initWorkspace(dir, { taskId: "task-000000000008" });
+    writeFixtureManifest(dir);
+    writeFileSync(
+      path.join(dir, "src", "main.tsx"),
+      'import { createRoot } from "react-dom/client";\nimport { App } from "./App";\n\ncreateRoot(document.getElementById("root")!).render(<App />);\n'
+    );
+    writeFileSync(path.join(dir, "src", "App.tsx"), 'export function App() {\n  return <div>no-sdk-import</div>;\n}\n');
+    const result = await buildApp(dir);
+    expect(result.report.status).toBe("success");
+    expect(result.bundle).not.toBeNull();
+    expect(result.bundle!.html).toContain("QUBITS_HANDSHAKE");
+  });
+
   it("静态扫描阻断 eval / fetch / localStorage（SECURITY_BLOCKED）", async () => {
     const dir = makeWorkspace();
     initWorkspace(dir, { taskId: "task-000000000003" });
