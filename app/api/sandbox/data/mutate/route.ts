@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getRepository } from "@/lib/db";
 import { performMutateOperation, resolveSession } from "@/lib/db/sandbox-data";
-import { newRequestId, readProjectId, sandboxErrorResponse } from "@/lib/sandbox/server-session";
+import { newRequestId, resolveProjectId, sandboxErrorResponse } from "@/lib/sandbox/server-session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +45,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
     const { sessionId, operation, collection: collectionName } = parsed.data;
     const repo = getRepository();
-    const projectId = readProjectId(request);
+    const projectId = resolveProjectId(request, repo);
     const session = resolveSession(repo, projectId, sessionId);
     const result = performMutateOperation(repo, session, {
       operation,

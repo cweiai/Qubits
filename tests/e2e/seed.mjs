@@ -88,6 +88,8 @@ function digest(content) {
 }
 
 function seedProject(projectId, index) {
+  const userId = `usr-e2e-0000000${index}`;
+  const sessionId = `sess-e2e000000000000000000000000000${index}`;
   const conversationId = `conv-e2e-0000000${index}`;
   const taskId = `task-e2e-0000000${index}`;
   const snapshotId = `snap-e2e-0000000${index}`;
@@ -102,7 +104,11 @@ function seedProject(projectId, index) {
     return { path: relativePath, hash: digest(content), size: Buffer.byteLength(content) };
   });
 
-  db.prepare("INSERT INTO projects (id, created_at, updated_at) VALUES (?, ?, ?)").run(projectId, now, now);
+  db.prepare("INSERT INTO users (id, email, password_hash, created_at, updated_at) VALUES (?, ?, 'e2e', ?, ?)")
+    .run(userId, `e2e-${index}@example.com`, now, now);
+  db.prepare("INSERT INTO auth_sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)")
+    .run(sessionId, userId, now, now + 24 * 60 * 60 * 1000);
+  db.prepare("INSERT INTO projects (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)").run(projectId, userId, now, now);
   db.prepare("INSERT INTO conversations (id, project_id, title, title_source, status, manifest_json, current_snapshot_id, preview_bundle_id, preview_version, created_at, updated_at, last_message_at) VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, 1, ?, ?, ?)")
     .run(conversationId, projectId, "通用工作台", JSON.stringify(manifest), snapshotId, previewId, now, now, now);
   db.prepare("INSERT INTO conversation_messages (id, conversation_id, role, content, status, metadata_json, request_id, task_id, created_at, updated_at) VALUES (?, ?, 'user', ?, 'completed', '{}', ?, ?, ?, ?)")

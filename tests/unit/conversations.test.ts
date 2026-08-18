@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { NextRequest } from "next/server";
-import { resetRepositoryForTests } from "@/lib/db";
+import { getRepository, resetRepositoryForTests } from "@/lib/db";
 import { resetRateLimitsForTests } from "@/lib/db/sandbox-data";
 import { GET as projectGet, POST as projectMigrate } from "@/app/api/projects/current/route";
 import { GET as listGet, POST as listPost } from "@/app/api/projects/current/conversations/route";
@@ -15,11 +15,30 @@ import { makeTaskManifest, makeTaskSpec } from "./fixtures";
 import { isRunActive, registerRun, resetRunRegistryForTests } from "@/lib/ai/run-registry";
 
 let dbDir: string;
+const authCookies = new Map<string, string>();
+
+function authenticatedCookie(cookie: string): string {
+  const projectId = /(?:^|;\s*)qubits_project=([^;]+)/.exec(cookie)?.[1];
+  if (!projectId) return cookie;
+  const existing = authCookies.get(projectId);
+  if (existing) return existing;
+  const repo = getRepository();
+  const suffix = crypto.randomUUID().replace(/-/g, "");
+  const userId = `usr-${suffix}`;
+  repo.createUser({ id: userId, email: `${suffix}@example.com`, passwordHash: "test" });
+  repo.ensureProject(projectId);
+  repo.setProjectUser(projectId, userId);
+  const sessionId = `sess-${crypto.randomUUID().replace(/-/g, "")}`;
+  repo.createAuthSession({ id: sessionId, userId, expiresAt: Date.now() + 60_000 });
+  const value = `qubits_project=${projectId}; qubits_auth=${sessionId}`;
+  authCookies.set(projectId, value);
+  return value;
+}
 
 function req(pathname: string, method: string, body: unknown, cookie = "qubits_project=prj-cv-000001") {
   return new NextRequest("http://localhost" + pathname, {
     method,
-    headers: { "content-type": "application/json", cookie },
+    headers: { "content-type": "application/json", cookie: authenticatedCookie(cookie) },
     body: body === null ? undefined : JSON.stringify(body),
   });
 }
@@ -229,7 +248,7 @@ describe("多对话 API", () => {
     const missing = await previewGet(
       new NextRequest("http://localhost/api/projects/current/preview?conversationId=" + convB.id, {
         method: "GET",
-        headers: { cookie: "qubits_project=prj-cv-000001" },
+        headers: { cookie: authenticatedCookie("qubits_project=prj-cv-000001") },
       })
     );
     expect(missing.status).toBe(404);
@@ -237,7 +256,7 @@ describe("多对话 API", () => {
     const present = await previewGet(
       new NextRequest("http://localhost/api/projects/current/preview?conversationId=" + convA.id, {
         method: "GET",
-        headers: { cookie: "qubits_project=prj-cv-000001" },
+        headers: { cookie: authenticatedCookie("qubits_project=prj-cv-000001") },
       })
     );
     expect(present.status).toBe(200);
@@ -260,7 +279,7 @@ describe("多对话 API", () => {
     const jsonBundle = await previewGet(
       new NextRequest("http://localhost/api/projects/current/preview?conversationId=" + convA.id, {
         method: "GET",
-        headers: { cookie: "qubits_project=prj-cv-000001" },
+        headers: { cookie: authenticatedCookie("qubits_project=prj-cv-000001") },
       })
     );
     expect(jsonBundle.status).toBe(200);

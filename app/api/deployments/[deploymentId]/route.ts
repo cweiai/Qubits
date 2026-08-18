@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRepository } from "@/lib/db";
 import { apiErrorResponse, ApiError } from "@/lib/server/api-response";
-import { newProjectId, newRequestId, readProjectId } from "@/lib/sandbox/server-session";
+import { newRequestId, resolveProjectId } from "@/lib/sandbox/server-session";
 import { DeployError } from "@/lib/deploy/errors";
 import { stopDeployment } from "@/lib/deploy/manager";
 import { DEPLOYMENT_ID_PATTERN } from "@/lib/deploy/router";
@@ -25,7 +25,7 @@ export async function DELETE(
       throw new ApiError("INVALID_REQUEST", "deploymentId 不合法", 400);
     }
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     const row = repo.getDeployment(deploymentId);
     if (!row || row.projectId !== projectId) {
       throw new ApiError("DEPLOYMENT_NOT_FOUND", "部署不存在或已删除", 404);

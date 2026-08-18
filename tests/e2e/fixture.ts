@@ -2,6 +2,7 @@ import { expect, type Page } from "@playwright/test";
 
 export const E2E_PROJECT_IDS = ["prj-e2e-00000001", "prj-e2e-00000002"] as const;
 export const E2E_CONVERSATION_IDS = ["conv-e2e-00000001", "conv-e2e-00000002"] as const;
+export const E2E_SESSION_IDS = ["sess-e2e0000000000000000000000000001", "sess-e2e0000000000000000000000000002"] as const;
 export const FRAME = 'iframe[data-testid="sandbox-iframe"]';
 
 export async function openFixture(page: Page, index = 0, mode: "visible" | "attached" = "visible"): Promise<void> {
@@ -9,6 +10,11 @@ export async function openFixture(page: Page, index = 0, mode: "visible" | "atta
     {
       name: "qubits_project",
       value: E2E_PROJECT_IDS[index],
+      url: "http://127.0.0.1:3206",
+    },
+    {
+      name: "qubits_auth",
+      value: E2E_SESSION_IDS[index],
       url: "http://127.0.0.1:3206",
     },
   ]);

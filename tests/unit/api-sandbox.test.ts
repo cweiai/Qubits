@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { NextRequest } from "next/server";
-import { resetRepositoryForTests } from "@/lib/db";
+import { getRepository, resetRepositoryForTests } from "@/lib/db";
 import { resetRateLimitsForTests } from "@/lib/db/sandbox-data";
 import { POST as sessionPost } from "@/app/api/sandbox/session/route";
 import { POST as listPost } from "@/app/api/sandbox/data/list/route";
@@ -11,13 +11,32 @@ import { POST as mutatePost } from "@/app/api/sandbox/data/mutate/route";
 import { makeTaskManifest } from "./fixtures";
 
 let dbDir: string;
+const authCookies = new Map<string, string>();
+
+function authenticatedCookie(cookie: string): string {
+  const projectId = /(?:^|;\s*)qubits_project=([^;]+)/.exec(cookie)?.[1];
+  if (!projectId) return cookie;
+  const existing = authCookies.get(projectId);
+  if (existing) return existing;
+  const repo = getRepository();
+  const suffix = crypto.randomUUID().replace(/-/g, "");
+  const userId = `usr-${suffix}`;
+  repo.createUser({ id: userId, email: `${suffix}@example.com`, passwordHash: "test" });
+  repo.ensureProject(projectId);
+  repo.setProjectUser(projectId, userId);
+  const sessionId = `sess-${crypto.randomUUID().replace(/-/g, "")}`;
+  repo.createAuthSession({ id: sessionId, userId, expiresAt: Date.now() + 60_000 });
+  const value = `qubits_project=${projectId}; qubits_auth=${sessionId}`;
+  authCookies.set(projectId, value);
+  return value;
+}
 
 function request(pathname: string, body: unknown, cookie?: string): NextRequest {
   return new NextRequest(`http://localhost${pathname}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...(cookie ? { cookie } : {}),
+      ...(cookie ? { cookie: authenticatedCookie(cookie) } : {}),
     },
     body: JSON.stringify(body),
   });

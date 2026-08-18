@@ -13,6 +13,7 @@ import type { RoleId } from "@/lib/contracts/agent-events";
 
 interface ProjectRow {
   id: string;
+  userId: string | null;
   appSpecJson: string | null;
   productBriefJson: string | null;
   appBlueprintJson: string | null;
@@ -22,6 +23,21 @@ interface ProjectRow {
   previewVersion: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface UserRow {
+  id: string;
+  email: string;
+  passwordHash: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AuthSessionRow {
+  id: string;
+  userId: string;
+  createdAt: number;
+  expiresAt: number;
 }
 
 export interface ConversationRow {
@@ -181,6 +197,8 @@ export class AppRepository {
   private migrateLegacyColumns(): void {
     const columns = this.db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((c) => c.name));
+    if (!names.has("user_id")) this.db.exec("ALTER TABLE projects ADD COLUMN user_id TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_projects_user ON projects (user_id)");
     if (!names.has("app_spec_json")) this.db.exec("ALTER TABLE projects ADD COLUMN app_spec_json TEXT");
     if (!names.has("product_brief_json")) this.db.exec("ALTER TABLE projects ADD COLUMN product_brief_json TEXT");
     if (!names.has("app_blueprint_json")) this.db.exec("ALTER TABLE projects ADD COLUMN app_blueprint_json TEXT");
@@ -285,22 +303,79 @@ export class AppRepository {
 
   // ── Project drafts ──
 
-  ensureProject(projectId: string): void {
+  createUser(input: { id: string; email: string; passwordHash: string }): UserRow {
     const now = Date.now();
     this.db
-      .prepare(
-        "INSERT INTO projects (id, app_spec_json, product_brief_json, app_blueprint_json, created_at, updated_at) VALUES (?, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO NOTHING"
-      )
-      .run(projectId, now, now);
+      .prepare("INSERT INTO users (id, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+      .run(input.id, input.email, input.passwordHash, now, now);
+    return { id: input.id, email: input.email, passwordHash: input.passwordHash, createdAt: now, updatedAt: now };
   }
 
-  getProject(projectId: string): ProjectRow | null {
-    const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId) as
-      | Record<string, unknown>
-      | undefined;
-    if (!row) return null;
+  getUser(id: string): UserRow | null {
+    const row = this.db.prepare("SELECT * FROM users WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapUser(row) : null;
+  }
+
+  getUserByEmail(email: string): UserRow | null {
+    const row = this.db.prepare("SELECT * FROM users WHERE email = ?").get(email) as Record<string, unknown> | undefined;
+    return row ? this.mapUser(row) : null;
+  }
+
+  createAuthSession(input: { id: string; userId: string; expiresAt: number }): AuthSessionRow {
+    const createdAt = Date.now();
+    this.db
+      .prepare("INSERT INTO auth_sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)")
+      .run(input.id, input.userId, createdAt, input.expiresAt);
+    return { id: input.id, userId: input.userId, createdAt, expiresAt: input.expiresAt };
+  }
+
+  getAuthSession(id: string): AuthSessionRow | null {
+    const row = this.db.prepare("SELECT * FROM auth_sessions WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapAuthSession(row) : null;
+  }
+
+  deleteAuthSession(id: string): void {
+    this.db.prepare("DELETE FROM auth_sessions WHERE id = ?").run(id);
+  }
+
+  deleteExpiredAuthSessions(now = Date.now()): number {
+    const result = this.db.prepare("DELETE FROM auth_sessions WHERE expires_at <= ?").run(now);
+    return Number(result.changes ?? 0);
+  }
+
+  listUserProjects(userId: string): ProjectRow[] {
+    const rows = this.db.prepare("SELECT * FROM projects WHERE user_id = ? ORDER BY updated_at DESC").all(userId) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapProject(row));
+  }
+
+  claimProject(projectId: string, userId: string): boolean {
+    const result = this.db.prepare("UPDATE projects SET user_id = ?, updated_at = ? WHERE id = ? AND user_id IS NULL").run(userId, Date.now(), projectId);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  setProjectUser(projectId: string, userId: string): boolean {
+    const result = this.db.prepare("UPDATE projects SET user_id = ?, updated_at = ? WHERE id = ?").run(userId, Date.now(), projectId);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  private mapUser(row: Record<string, unknown>): UserRow {
     return {
       id: row.id as string,
+      email: row.email as string,
+      passwordHash: row.password_hash as string,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  private mapAuthSession(row: Record<string, unknown>): AuthSessionRow {
+    return { id: row.id as string, userId: row.user_id as string, createdAt: Number(row.created_at), expiresAt: Number(row.expires_at) };
+  }
+
+  private mapProject(row: Record<string, unknown>): ProjectRow {
+    return {
+      id: row.id as string,
+      userId: (row.user_id as string | null) ?? null,
       appSpecJson: (row.app_spec_json as string | null) ?? null,
       productBriefJson: (row.product_brief_json as string | null) ?? null,
       appBlueprintJson: (row.app_blueprint_json as string | null) ?? null,
@@ -311,6 +386,23 @@ export class AppRepository {
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     };
+  }
+
+  ensureProject(projectId: string): void {
+    const now = Date.now();
+    this.db
+      .prepare(
+        "INSERT INTO projects (id, user_id, app_spec_json, product_brief_json, app_blueprint_json, created_at, updated_at) VALUES (?, NULL, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO NOTHING"
+      )
+      .run(projectId, now, now);
+  }
+
+  getProject(projectId: string): ProjectRow | null {
+    const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+    return this.mapProject(row);
   }
 
   updateProjectDraft(
@@ -764,36 +856,6 @@ export class AppRepository {
       .run(Date.now(), projectId, staleBefore);
     this.db.prepare("UPDATE approvals SET status = 'expired', resolved_at = ? WHERE project_id = ? AND status = 'pending'").run(Date.now(), projectId);
     return Number(result.changes ?? 0);
-  }
-
-  /** Reset project: clears conversations/messages/tasks/drafts/records/sandbox sessions. */
-  clearProject(projectId: string): void {
-    this.db.exec("BEGIN");
-    try {
-      const conversationIds = this.db
-        .prepare("SELECT id FROM conversations WHERE project_id = ?")
-        .all(projectId) as Array<{ id: string }>;
-      for (const row of conversationIds) {
-        this.db.prepare("DELETE FROM build_tasks WHERE conversation_id = ?").run(row.id);
-        this.db.prepare("DELETE FROM conversation_messages WHERE conversation_id = ?").run(row.id);
-      }
-      this.db.prepare("DELETE FROM conversations WHERE project_id = ?").run(projectId);
-      this.db.prepare("DELETE FROM sandbox_sessions WHERE project_id = ?").run(projectId);
-      this.db.prepare("DELETE FROM app_records WHERE project_id = ?").run(projectId);
-      this.db.prepare("DELETE FROM deployments WHERE project_id = ?").run(projectId);
-      this.db.prepare("DELETE FROM code_snapshots WHERE project_id = ?").run(projectId);
-      this.db.prepare("DELETE FROM artifacts WHERE project_id = ?").run(projectId);
-      this.db.prepare("DELETE FROM approvals WHERE project_id = ?").run(projectId);
-      this.db
-        .prepare(
-          "UPDATE projects SET app_spec_json = NULL, product_brief_json = NULL, app_blueprint_json = NULL, manifest_json = NULL, current_snapshot_id = NULL, preview_bundle_id = NULL, preview_version = 0, updated_at = ? WHERE id = ?"
-        )
-        .run(Date.now(), projectId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
   }
 
   // ── Sandbox sessions ──

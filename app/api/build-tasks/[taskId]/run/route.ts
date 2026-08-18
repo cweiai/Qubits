@@ -4,7 +4,7 @@ import { qubitsManifestSchema, type QubitsManifest } from "@/lib/contracts/manif
 import { runMikeOrchestrator } from "@/lib/ai/mike-orchestrator";
 import { buildResumeContext, type ResumeSource } from "@/lib/ai/resume-context";
 import { getRepository } from "@/lib/db";
-import { newProjectId, readProjectId } from "@/lib/sandbox/server-session";
+import { resolveProjectId } from "@/lib/sandbox/server-session";
 import { ApiError, apiErrorResponse } from "@/lib/server/api-response";
 import { toTaskJson } from "@/lib/server/conversation-io";
 import type { AgentEvent } from "@/lib/contracts/agent-events";
@@ -79,7 +79,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
     const params = await context.params;
     taskId = params.taskId;
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     const task = repo.getTask(taskId);
     if (!task || task.projectId !== projectId) {
       return apiErrorResponse(new ApiError("TASK_NOT_FOUND", "构建任务不存在", 404), requestId);
@@ -417,7 +417,7 @@ export async function GET(_request: NextRequest, context: RouteContext): Promise
   try {
     const { taskId } = await context.params;
     const repo = getRepository();
-    const projectId = readProjectId(_request) ?? newProjectId();
+    const projectId = resolveProjectId(_request, repo);
     const task = repo.getTask(taskId);
     if (!task || task.projectId !== projectId) {
       return apiErrorResponse(new ApiError("TASK_NOT_FOUND", "构建任务不存在", 404), requestId);

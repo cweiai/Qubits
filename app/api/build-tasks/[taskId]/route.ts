@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRepository } from "@/lib/db";
-import { newProjectId, newRequestId, readProjectId } from "@/lib/sandbox/server-session";
+import { newRequestId, resolveProjectId } from "@/lib/sandbox/server-session";
 import { apiErrorResponse, ApiError } from "@/lib/server/api-response";
 import { toTaskJson } from "@/lib/server/conversation-io";
 
@@ -22,7 +22,7 @@ export async function GET(_request: NextRequest, context: RouteContext): Promise
   try {
     const { taskId } = await context.params;
     const repo = getRepository();
-    const projectId = readProjectId(_request) ?? newProjectId();
+    const projectId = resolveProjectId(_request, repo);
     const task = requireTask(repo, projectId, taskId);
     return NextResponse.json({ ok: true, data: { task: toTaskJson(task) } });
   } catch (error) {
@@ -41,7 +41,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
   try {
     const { taskId } = await context.params;
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     const task = requireTask(repo, projectId, taskId);
 
     const conversation = repo.getConversation(task.conversationId);

@@ -2,8 +2,26 @@
 -- Business records use a generic constrained table; conversations/messages/build tasks are
 -- persisted per-project; arbitrary tables are never created for AI output.
 
+CREATE TABLE IF NOT EXISTS users (
+  id           TEXT PRIMARY KEY,
+  email        TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions (expires_at);
+
 CREATE TABLE IF NOT EXISTS projects (
   id                 TEXT PRIMARY KEY,
+  user_id            TEXT,
   app_spec_json      TEXT,
   product_brief_json TEXT,
   app_blueprint_json TEXT,

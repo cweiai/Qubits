@@ -2,9 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getRepository } from "@/lib/db";
 import {
   attachProjectCookie,
-  newProjectId,
   newRequestId,
-  readProjectId,
+  resolveProjectId,
 } from "@/lib/sandbox/server-session";
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/api-response";
 import { toConversationJson, toTaskJson } from "@/lib/server/conversation-io";
@@ -21,7 +20,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const requestId = newRequestId();
   try {
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     repo.ensureProject(projectId);
     // One-time migration of legacy project-level app state to the most recent conversation.
     repo.migrateProjectAppToLatestConversation(projectId);
@@ -47,7 +46,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const requestId = newRequestId();
   try {
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     repo.ensureProject(projectId);
 
     const body = createConversationBodySchema.safeParse(await readJson(request));

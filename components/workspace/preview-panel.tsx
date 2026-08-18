@@ -170,7 +170,7 @@ function ManifestError({ issues }: { issues: string }) {
         <p className="text-sm font-medium text-red-700">manifest 校验失败</p>
       </div>
       <p className="mt-1.5 text-xs text-red-600">
-        当前存储的应用清单无法通过校验，预览已停用。点击右上角“重置项目”可重新开始。
+        当前存储的应用清单无法通过校验，预览已停用。请在左侧新建对话并重新生成。
       </p>
       <pre className="qubits-scroll mt-3 max-h-48 overflow-auto rounded-md border border-red-200 bg-white p-3 text-[11px] leading-relaxed text-red-700 whitespace-pre-wrap break-all">
         {issues}

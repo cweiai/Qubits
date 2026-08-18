@@ -51,6 +51,12 @@ interface ProjectData {
   updatedAt: number | null;
 }
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  createdAt: number;
+}
+
 export interface CodeFile {
   path: string;
   size: number;
@@ -164,6 +170,15 @@ export interface ConversationDetail {
 }
 
 export const api = {
+  getCurrentUser: () => request<{ user: AuthUser | null }>("/api/auth/me"),
+  register: (email: string, password: string, confirmPassword: string) =>
+    request<{ user: AuthUser }>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ email, password, confirmPassword }),
+    }),
+  login: (email: string, password: string) =>
+    request<{ user: AuthUser }>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  logout: () => request<{ loggedOut: boolean }>("/api/auth/logout", { method: "POST", body: "{}" }),
   getProject: () => request<ProjectData>("/api/projects/current"),
   migrateLegacy: (payload: unknown) =>
     request<{ migrated: boolean; conversationId?: string; migratedMessages?: number }>(
@@ -198,8 +213,6 @@ export const api = {
     request<{ task: TaskJson | null }>(`/api/build-tasks/${taskId}`, { method: "POST" }),
   getTask: (taskId: string) =>
     request<{ task: TaskJson }>(`/api/build-tasks/${taskId}`),
-  resetProject: () =>
-    request<{ reset: boolean }>("/api/projects/current/reset", { method: "POST", body: "{}" }),
   getCodeFiles: (conversationId: string) =>
     request<{ version: number | null; files: CodeFile[] }>(
       `/api/projects/current/code?conversationId=${encodeURIComponent(conversationId)}`

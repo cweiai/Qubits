@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRepository } from "@/lib/db";
-import { newProjectId, newRequestId, readProjectId } from "@/lib/sandbox/server-session";
+import { newRequestId, resolveProjectId } from "@/lib/sandbox/server-session";
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/api-response";
 import { toMessageJson, toTaskJson } from "@/lib/server/conversation-io";
 import { listMessagesQuerySchema, sendMessageBodySchema } from "@/lib/validation/conversation";
@@ -24,7 +24,7 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
   try {
     const { conversationId } = await context.params;
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     requireConversation(repo, projectId, conversationId);
 
     const url = new URL(request.url);
@@ -53,7 +53,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
   try {
     const { conversationId } = await context.params;
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     const conversation = requireConversation(repo, projectId, conversationId);
 
     if (conversation.status === "archived") {

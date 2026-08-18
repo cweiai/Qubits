@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRepository } from "@/lib/db";
-import { newProjectId, newRequestId, readProjectId } from "@/lib/sandbox/server-session";
+import { newRequestId, resolveProjectId } from "@/lib/sandbox/server-session";
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/api-response";
 import { toApprovalJson, toConversationJson, toMessageJson, toTaskJson } from "@/lib/server/conversation-io";
 import { listMessagesQuerySchema, patchConversationBodySchema } from "@/lib/validation/conversation";
@@ -25,7 +25,7 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
   try {
     const { conversationId } = await context.params;
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     // One-time migration of legacy project-level app state.
     repo.migrateProjectAppToLatestConversation(projectId);
     const conversation = requireConversation(repo, projectId, conversationId);
@@ -60,7 +60,7 @@ export async function PATCH(request: NextRequest, context: RouteContext): Promis
   try {
     const { conversationId } = await context.params;
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     requireConversation(repo, projectId, conversationId);
 
     const body = patchConversationBodySchema.safeParse(await readJson(request));
@@ -87,7 +87,7 @@ export async function DELETE(request: NextRequest, context: RouteContext): Promi
   try {
     const { conversationId } = await context.params;
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     requireConversation(repo, projectId, conversationId);
 
     // Terminate running generations first and wait for them to settle, so a deleted

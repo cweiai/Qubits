@@ -5,9 +5,8 @@ import { getRepository } from "@/lib/db";
 import { SESSION_TTL_MS } from "@/lib/db/sandbox-data";
 import {
   attachProjectCookie,
-  newProjectId,
   newRequestId,
-  readProjectId,
+  resolveProjectId,
   sandboxErrorResponse,
 } from "@/lib/sandbox/server-session";
 
@@ -50,10 +49,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const collections = manifest.collections;
 
     // Project ownership comes from an HTTP-only cookie (created when absent)
-    const projectId = readProjectId(request) ?? newProjectId();
-
     const repo = getRepository();
-    repo.ensureProject(projectId);
+    const projectId = resolveProjectId(request, repo);
     const conversation = repo.getConversation(parsed.data.conversationId);
     if (!conversation || conversation.projectId !== projectId) {
       return NextResponse.json(

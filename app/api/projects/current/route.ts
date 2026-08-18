@@ -3,9 +3,8 @@ import { appSpecSchema } from "@/lib/contracts/app-spec";
 import { getRepository } from "@/lib/db";
 import {
   attachProjectCookie,
-  newProjectId,
   newRequestId,
-  readProjectId,
+  resolveProjectId,
 } from "@/lib/sandbox/server-session";
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/api-response";
 import { migrateBodySchema } from "@/lib/validation/conversation";
@@ -37,7 +36,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const requestId = newRequestId();
   try {
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     repo.ensureProject(projectId);
     // Orphan recovery: mark running tasks past the threshold as retriable failures
     repo.markStaleRunningTasks(projectId, Date.now() - STALE_TASK_MS);
@@ -73,7 +72,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const requestId = newRequestId();
   try {
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     repo.ensureProject(projectId);
 
     const existing = repo.listConversations(projectId);

@@ -13,7 +13,7 @@ test("阶段进度：不再展示工具调用，只按阶段展示思维链摘�
   await expect(page.getByTestId("stage-progress-previewing")).toContainText("预览已通过门禁并提交完成");
 
   // After the run all four phases are completed.
-  await expect(page.getByTestId("workspace-status")).toContainText("就绪", { timeout: 180_000 });
+  await expect(page.locator('iframe[data-testid="sandbox-iframe"]')).toBeVisible({ timeout: 180_000 });
   await expect(page.getByTestId("stage-progress-planning")).toHaveAttribute("data-status", "completed");
   await expect(page.getByTestId("stage-progress-coding")).toHaveAttribute("data-status", "completed");
   await expect(page.getByTestId("stage-progress-validating")).toHaveAttribute("data-status", "completed");

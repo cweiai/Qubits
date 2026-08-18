@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRepository } from "@/lib/db";
-import { newProjectId, newRequestId, readProjectId } from "@/lib/sandbox/server-session";
+import { newRequestId, resolveProjectId } from "@/lib/sandbox/server-session";
 import { apiErrorResponse, ApiError } from "@/lib/server/api-response";
 import { injectPostMessageGuard } from "@/lib/workspace/postmessage-guard";
 import { extractBundleHtml } from "@/lib/deploy/bundle";
@@ -49,7 +49,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const requestId = newRequestId();
   try {
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     const url = new URL(request.url);
     const conversationId = url.searchParams.get("conversationId") ?? "";
     const conversation = repo.getConversation(conversationId);

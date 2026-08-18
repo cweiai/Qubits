@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { denyApproval, grantApproval } from "@/lib/ai/tools/approval";
 import { getRepository } from "@/lib/db";
-import { readProjectId, newProjectId } from "@/lib/sandbox/server-session";
+import { resolveProjectId } from "@/lib/sandbox/server-session";
 import { apiErrorResponse, ApiError } from "@/lib/server/api-response";
 
 export const runtime = "nodejs";
@@ -12,8 +12,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ap
   const requestId = crypto.randomUUID();
   try {
     const { approvalId } = await context.params;
-    const projectId = readProjectId(request) ?? newProjectId();
-    const approval = getRepository().getApproval(approvalId);
+    const repo = getRepository();
+    const projectId = resolveProjectId(request, repo);
+    const approval = repo.getApproval(approvalId);
     if (!approval || (approval.projectId !== null && approval.projectId !== projectId)) {
       throw new ApiError("APPROVAL_NOT_FOUND", "审批不存在或不属于当前项目", 404);
     }

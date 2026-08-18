@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SandboxError } from "@/lib/db/sandbox-data";
+import type { AppRepository } from "@/lib/db/repository";
+import { ApiError } from "@/lib/server/api-response";
+import { requireAuthUser } from "@/lib/server/auth";
 
-/**
- * Anonymous project session: project ownership is decided only by the server-issued HTTP-only cookie;
- * the projectId sent by the browser is never trusted.
- */
+/** Resolves project scope from authentication and server-owned cookies. */
 
 const PROJECT_COOKIE = "qubits_project";
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
@@ -19,6 +19,20 @@ export function newProjectId(): string {
   return "prj-" + crypto.randomUUID();
 }
 
+export function resolveProjectId(request: NextRequest, repo: AppRepository): string {
+  const cookieProjectId = readProjectId(request);
+  const user = requireAuthUser(request, repo);
+  const current = cookieProjectId ? repo.getProject(cookieProjectId) : null;
+  if (current?.userId === user.id) return current.id;
+
+  const owned = repo.listUserProjects(user.id)[0];
+  if (owned) return owned.id;
+  const projectId = newProjectId();
+  repo.ensureProject(projectId);
+  repo.setProjectUser(projectId, user.id);
+  return projectId;
+}
+
 /** (Re)writes the project cookie on the response: idempotent renewal, always returned with the final response. */
 export function attachProjectCookie(response: NextResponse, projectId: string): void {
   response.cookies.set({
@@ -26,8 +40,21 @@ export function attachProjectCookie(response: NextResponse, projectId: string): 
     value: projectId,
     httpOnly: true,
     sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: COOKIE_MAX_AGE,
+  });
+}
+
+export function clearProjectCookie(response: NextResponse): void {
+  response.cookies.set({
+    name: PROJECT_COOKIE,
+    value: "",
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 0,
   });
 }
 
@@ -36,6 +63,12 @@ export function newRequestId(): string {
 }
 
 export function sandboxErrorResponse(error: unknown, requestId: string | null): NextResponse {
+  if (error instanceof ApiError) {
+    return NextResponse.json(
+      { ok: false, error: { code: error.code, message: error.message, requestId } },
+      { status: error.status }
+    );
+  }
   if (error instanceof SandboxError) {
     return NextResponse.json(
       { ok: false, error: { code: error.code, message: error.message, requestId } },

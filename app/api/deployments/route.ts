@@ -3,7 +3,7 @@ import { z } from "zod";
 import { getRepository } from "@/lib/db";
 import type { DeploymentRow } from "@/lib/db/repository";
 import { apiErrorResponse, ApiError } from "@/lib/server/api-response";
-import { newProjectId, newRequestId, readProjectId } from "@/lib/sandbox/server-session";
+import { newRequestId, resolveProjectId } from "@/lib/sandbox/server-session";
 import { qubitsManifestSchema } from "@/lib/contracts/manifest";
 import { DeployError } from "@/lib/deploy/errors";
 import { deployConversationApp, deploymentPublicUrl, getDeployRuntimeStatus, reconcileStaleDeployments } from "@/lib/deploy/manager";
@@ -45,7 +45,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const requestId = newRequestId();
   try {
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     const url = new URL(request.url);
     const conversationId = url.searchParams.get("conversationId") ?? "";
     const conversation = repo.getConversation(conversationId);
@@ -84,7 +84,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     const repo = getRepository();
-    const projectId = readProjectId(request) ?? newProjectId();
+    const projectId = resolveProjectId(request, repo);
     const conversation = repo.getConversation(parsed.data.conversationId);
     if (!conversation || conversation.projectId !== projectId) {
       throw new ApiError("CONVERSATION_NOT_FOUND", "对话不存在", 404);

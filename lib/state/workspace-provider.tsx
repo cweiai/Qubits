@@ -56,7 +56,6 @@ interface WorkspaceContextValue {
   deleteConversation(id: string): Promise<void>;
   submitPrompt(content: string): Promise<boolean>;
   retryTask(taskId: string): void;
-  resetProject(): Promise<void>;
   setPreviewDevice(device: PreviewDevice): void;
   setPreferences(prefs: WorkspacePreferences): void;
   refreshPreview(): void;
@@ -354,16 +353,6 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     [streamTask]
   );
 
-  const resetProject = useCallback(async () => {
-    try {
-      await api.resetProject();
-      clearLegacyProjectState();
-      window.location.reload();
-    } catch (error) {
-      dispatch({ type: "set-error", message: friendlyError(error) });
-    }
-  }, []);
-
   const setPreviewDevice = useCallback((device: PreviewDevice) => {
     const prefs = { ...stateRef.current.prefs, previewDevice: device };
     savePreferences(prefs);
@@ -437,14 +426,13 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       deleteConversation,
       submitPrompt,
       retryTask,
-      resetProject,
       setPreviewDevice,
       setPreferences,
       refreshPreview,
       clearError,
       resolveApproval,
     };
-  }, [state, switchConversation, createConversation, renameConversation, setConversationStatus, deleteConversation, submitPrompt, retryTask, resetProject, setPreviewDevice, setPreferences, refreshPreview, clearError, resolveApproval]);
+  }, [state, switchConversation, createConversation, renameConversation, setConversationStatus, deleteConversation, submitPrompt, retryTask, setPreviewDevice, setPreferences, refreshPreview, clearError, resolveApproval]);
 
   if (!mounted) {
     return <div className="flex h-dvh items-center justify-center text-sm text-muted-foreground">正在加载工作台…</div>;

@@ -1,29 +1,21 @@
 "use client";
 
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Boxes, Menu, PanelRightClose, PanelRightOpen, RotateCcw } from "lucide-react";
+import { Boxes, LogOut, Menu, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { WorkspaceProvider, useWorkspace } from "@/lib/state/workspace-provider";
 import { ConversationPanel } from "./conversation-panel";
 import { ConversationSidebar } from "./conversation-sidebar";
 import { PreviewPanel } from "./preview-panel";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { usePreviewPanelPolicy } from "@/hooks/use-preview-panel-policy";
 import { cn } from "@/lib/utils";
+import type { AuthUser } from "@/lib/workspace/api";
 import {
   PREVIEW_DEFAULT_WIDTH,
   PREVIEW_MAX_WIDTH,
   PREVIEW_MIN_WIDTH,
 } from "@/lib/storage/project-storage";
 
-type StatusTone = "green" | "amber" | "red" | "gray";
 type MobileTab = "conversation" | "preview";
 
 const SIDEBAR_WIDTH = 280;
@@ -34,20 +26,31 @@ function clampPreviewWidth(value: number): number {
   return Math.min(PREVIEW_MAX_WIDTH, Math.max(PREVIEW_MIN_WIDTH, Math.round(value)));
 }
 
-export function WorkspaceShell() {
+export function WorkspaceShell({
+  user,
+  onLogout,
+}: {
+  user: AuthUser;
+  onLogout(): void;
+}) {
   return (
     <WorkspaceProvider>
-      <WorkspaceInner />
+      <WorkspaceInner user={user} onLogout={onLogout} />
     </WorkspaceProvider>
   );
 }
 
-function WorkspaceInner() {
+function WorkspaceInner({
+  user,
+  onLogout,
+}: {
+  user: AuthUser;
+  onLogout(): void;
+}) {
   const workspace = useWorkspace();
-  const { state, isRunning, currentRoleName } = workspace;
+  const { state, isRunning } = workspace;
   const [tab, setTab] = useState<MobileTab>("conversation");
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [resetOpen, setResetOpen] = useState(false);
 
   const leftExpanded = state.prefs.leftSidebar === "expanded";
   const rightExpanded = state.prefs.rightPreview === "expanded";
@@ -152,13 +155,6 @@ function WorkspaceInner() {
   const expandRight = () => policy.expandByUser();
 
   const latestRun = state.tasks[0];
-  const status: { tone: StatusTone; text: string } = isRunning
-    ? { tone: "amber", text: "生成中 · " + (currentRoleName ?? "") }
-    : latestRun?.status === "failed"
-      ? { tone: "red", text: "生成失败" }
-      : hasPreviewNow
-        ? { tone: "green", text: "就绪" }
-        : { tone: "gray", text: "空闲" };
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
@@ -181,16 +177,18 @@ function WorkspaceInner() {
           </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <StatusBadge tone={status.tone} text={status.text} />
+          <span className="hidden max-w-48 truncate text-xs text-muted-foreground lg:block" title={user.email}>
+            {user.email}
+          </span>
           <Button
             variant="ghost"
             size="icon"
             className="h-8 w-8"
-            aria-label="重置项目"
-            title="重置项目（清除所有数据）"
-            onClick={() => setResetOpen(true)}
+            aria-label="退出登录"
+            title="退出登录"
+            onClick={onLogout}
           >
-            <RotateCcw className="h-4 w-4" />
+            <LogOut className="h-4 w-4" />
           </Button>
         </div>
       </header>
@@ -331,7 +329,6 @@ function WorkspaceInner() {
         </div>
       ) : null}
 
-      <ResetDialog open={resetOpen} onOpenChange={setResetOpen} />
     </div>
   );
 }
@@ -375,59 +372,5 @@ function MobileTabButton({
     >
       {label}
     </button>
-  );
-}
-
-function StatusBadge({ tone, text }: { tone: StatusTone; text: string }) {
-  const toneClasses: Record<StatusTone, string> = {
-    green: "border-emerald-200 bg-emerald-50 text-emerald-700",
-    amber: "border-amber-200 bg-amber-50 text-amber-700",
-    red: "border-red-200 bg-red-50 text-red-700",
-    gray: "border-zinc-200 bg-zinc-50 text-zinc-600",
-  };
-  const dotClasses: Record<StatusTone, string> = {
-    green: "bg-emerald-500",
-    amber: "bg-amber-500 animate-pulse",
-    red: "bg-red-500",
-    gray: "bg-zinc-400",
-  };
-  return (
-    <span
-      data-testid="workspace-status"
-      className={cn("hidden items-center gap-1.5 rounded-md border px-2 py-1 text-xs sm:inline-flex", toneClasses[tone])}
-    >
-      <span className={cn("h-1.5 w-1.5 rounded-full", dotClasses[tone])} />
-      {text}
-    </span>
-  );
-}
-
-function ResetDialog({ open, onOpenChange }: { open: boolean; onOpenChange(open: boolean): void }) {
-  const { resetProject } = useWorkspace();
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>重置项目？</DialogTitle>
-          <DialogDescription>
-            将清除所有对话、消息、代码快照、构建记录与全部应用数据，且无法恢复。
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={() => {
-              onOpenChange(false);
-              void resetProject();
-            }}
-          >
-            确认重置
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
