@@ -9,6 +9,7 @@ import {
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/api-response";
 import { migrateBodySchema } from "@/lib/validation/conversation";
 import { legacyManifestFromJson } from "@/lib/workspace/legacy-convert";
+import { isRunActive } from "@/lib/ai/run-registry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,8 +39,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const repo = getRepository();
     const projectId = resolveProjectId(request, repo);
     repo.ensureProject(projectId);
-    // Orphan recovery: mark running tasks past the threshold as retriable failures
-    repo.markStaleRunningTasks(projectId, Date.now() - STALE_TASK_MS);
+    const runningTask = repo.findRunningTask(projectId);
+    if (!runningTask || !isRunActive(runningTask.id)) {
+      repo.markStaleRunningTasks(projectId, Date.now() - STALE_TASK_MS);
+    }
     const project = repo.getProject(projectId);
     if (project?.appSpecJson) {
       const latest = repo.listConversations(projectId)[0];

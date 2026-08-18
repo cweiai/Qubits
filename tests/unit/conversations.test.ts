@@ -10,9 +10,10 @@ import { GET as listGet, POST as listPost } from "@/app/api/projects/current/con
 import { GET as convGet, PATCH as convPatch, DELETE as convDelete } from "@/app/api/conversations/[conversationId]/route";
 import { POST as msgPost } from "@/app/api/conversations/[conversationId]/messages/route";
 import { POST as taskRetry } from "@/app/api/build-tasks/[taskId]/route";
+import { DELETE as taskStop } from "@/app/api/build-tasks/[taskId]/run/route";
 import { autoTitle } from "@/lib/workspace/auto-title";
 import { makeTaskManifest, makeTaskSpec } from "./fixtures";
-import { isRunActive, registerRun, resetRunRegistryForTests } from "@/lib/ai/run-registry";
+import { isRunActive, registerRun, resetRunRegistryForTests, unregisterRun } from "@/lib/ai/run-registry";
 
 let dbDir: string;
 const authCookies = new Map<string, string>();
@@ -195,6 +196,76 @@ describe("多对话 API", () => {
     const after = await json(await convGet(req("/api/conversations/" + conv.id, "GET", null), convCtx(conv.id)));
     expect(after.ok).toBe(false);
     expect(after.error?.code).toBe("CONVERSATION_NOT_FOUND");
+  });
+
+  it("用户主动中断运行任务并保留可重试状态", async () => {
+    const conv = await createConv("conv-aaaa-000000000014");
+    const first = await send(conv.id, "主动中断测试", "req-idemp-000014");
+    const taskId = (first.body.data as { task: { id: string } }).task.id;
+    const repo = getRepository();
+    repo.updateTask(taskId, { status: "running", stage: "coding" });
+    const handle = registerRun(taskId);
+
+    const stopPromise = taskStop(req("/api/build-tasks/" + taskId + "/run", "DELETE", null), taskCtx(taskId));
+    await vi.waitFor(() => expect(handle.controller.signal.aborted).toBe(true));
+    unregisterRun(taskId);
+    handle.markDone();
+
+    const stopped = await json(await stopPromise);
+    expect(stopped.ok).toBe(true);
+    expect((stopped.data as { stopped: boolean }).stopped).toBe(true);
+    const task = repo.getTask(taskId);
+    expect(task?.status).toBe("failed");
+    expect(task?.errorCode).toBe("USER_ABORTED");
+    expect(task?.errorMessage).toContain("用户中断");
+  });
+
+  it("中断请求不会覆盖任务刚产生的真实失败结果", async () => {
+    const conv = await createConv("conv-aaaa-000000000016");
+    const first = await send(conv.id, "失败竞态测试", "req-idemp-000016");
+    const taskId = (first.body.data as { task: { id: string } }).task.id;
+    const repo = getRepository();
+    repo.updateTask(taskId, { status: "running", stage: "coding" });
+    const handle = registerRun(taskId);
+
+    const stopPromise = taskStop(req("/api/build-tasks/" + taskId + "/run", "DELETE", null), taskCtx(taskId));
+    await vi.waitFor(() => expect(handle.controller.signal.aborted).toBe(true));
+    repo.updateTask(taskId, { status: "failed", stage: "failed", errorCode: "BUILD_FAILED", errorMessage: "真实构建失败" });
+    unregisterRun(taskId);
+    handle.markDone();
+
+    const stopped = await json(await stopPromise);
+    expect((stopped.data as { stopped: boolean }).stopped).toBe(false);
+    expect(repo.getTask(taskId)?.errorCode).toBe("BUILD_FAILED");
+  });
+
+  it("页面加载不会把仍在后台运行的旧任务标记为失效", async () => {
+    vi.useFakeTimers();
+    try {
+      const cookie = authenticatedCookie("qubits_project=prj-cv-000001");
+      const conv = await createConv("conv-aaaa-000000000015");
+      const first = await send(conv.id, "后台运行恢复测试", "req-idemp-000015");
+      const taskId = (first.body.data as { task: { id: string } }).task.id;
+      const repo = getRepository();
+      repo.updateTask(taskId, { status: "running", stage: "coding" });
+      const handle = registerRun(taskId);
+
+      vi.advanceTimersByTime(6 * 60 * 1000);
+      const sessionId = /qubits_auth=([^;]+)/.exec(cookie)?.[1] ?? "";
+      const userId = repo.getAuthSession(sessionId)!.userId;
+      const freshSessionId = "sess-" + crypto.randomUUID();
+      repo.createAuthSession({ id: freshSessionId, userId, expiresAt: Date.now() + 60_000 });
+      const freshCookie = `qubits_project=prj-cv-000001; qubits_auth=${freshSessionId}`;
+      authCookies.set("prj-cv-000001", freshCookie);
+      await projectGet(req("/api/projects/current", "GET", null, freshCookie));
+      expect(repo.getTask(taskId)?.status).toBe("running");
+
+      unregisterRun(taskId);
+      handle.markDone();
+      repo.updateTask(taskId, { status: "failed", stage: "failed" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("重试同一任务：同任务续跑（不新建任务、不追加用户消息）", async () => {

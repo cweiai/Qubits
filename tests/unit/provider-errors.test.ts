@@ -143,7 +143,7 @@ describe("Provider 错误映射（stub fetch，不调用真实模型）", () => 
     expect(calls).toBe(1);
   });
 
-  it("用户 AbortSignal 不重试：AbortError 原样向上传播（CLIENT_ABORTED）", async () => {
+  it("用户 AbortSignal 不重试：AbortError 原样向上传播（USER_ABORTED）", async () => {
     process.env.OPENAI_API_KEY = "sk-test-key-000000000000000000";
     const controller = new AbortController();
     let calls = 0;

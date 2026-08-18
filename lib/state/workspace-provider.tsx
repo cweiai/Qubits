@@ -57,6 +57,7 @@ interface WorkspaceContextValue {
   deleteConversation(id: string): Promise<void>;
   submitPrompt(content: string): Promise<boolean>;
   retryTask(taskId: string): void;
+  stopTask(): Promise<void>;
   setPreviewDevice(device: PreviewDevice): void;
   setPreferences(prefs: WorkspacePreferences): void;
   refreshPreview(): void;
@@ -78,6 +79,20 @@ function writeConversationIdToUrl(id: string | null): void {
   if (id) url.searchParams.set("conversationId", id);
   else url.searchParams.delete("conversationId");
   window.history.replaceState(null, "", url.toString());
+}
+
+function findActiveTask(state: ReturnType<typeof createWorkspaceState>) {
+  const current = state.tasks.find((task) => task.status === "pending" || task.status === "running");
+  if (current) {
+    return { taskId: current.id, conversationId: current.conversationId, status: current.status };
+  }
+  for (const conversation of state.conversations) {
+    const task = conversation.lastTask;
+    if (task && (task.status === "pending" || task.status === "running")) {
+      return { taskId: task.id, conversationId: task.conversationId, status: task.status };
+    }
+  }
+  return null;
 }
 
 export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
@@ -136,20 +151,29 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       await streamTaskRun(
         taskId,
         controller.signal,
-        (event) => dispatch({ type: "task-event", taskId, event, now: Date.now() }),
-        (message) => dispatch({ type: "task-error", taskId, message, now: Date.now() })
+        (event) => dispatch({ type: "task-event", taskId, event, now: Date.now() })
       );
+      let stillActive = true;
       try {
         const detail = await api.getConversation(conversationId);
+        const task = detail.tasks.find((item) => item.id === taskId);
+        stillActive = task?.status === "pending" || task?.status === "running";
         if (stateRef.current.currentConversationId === conversationId) {
-          dispatch({ type: "task-refreshed", tasks: detail.tasks });
-          dispatch({ type: "approvals-refreshed", approvals: detail.pendingApprovals ?? [] });
+          dispatch({
+            type: "set-current",
+            id: conversationId,
+            messages: messagesToViews(detail.messages),
+            tasks: detail.tasks.map((task) => taskToView(task)),
+            app: detail.conversation.app ?? { manifest: null, previewVersion: 0, previewBundleId: null, currentSnapshotId: null },
+            pendingApprovals: detail.pendingApprovals ?? [],
+          });
         }
       } catch {
         // ignore
       }
-      dispatch({ type: "set-running", task: null });
+      if (!stillActive) dispatch({ type: "set-running", task: null });
       runningRef.current = false;
+      if (abortRef.current === controller) abortRef.current = null;
       void refreshConversationList();
     },
     [refreshConversationList]
@@ -215,6 +239,50 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
     };
   }, [mounted, reloadConversation]);
+
+  const activeTask = findActiveTask(state);
+
+  useEffect(() => {
+    if (!mounted || state.phase !== "ready") return;
+    if (!activeTask) {
+      if (state.runningTask && !runningRef.current) dispatch({ type: "set-running", task: null });
+      return;
+    }
+
+    if (state.runningTask?.taskId !== activeTask.taskId) {
+      dispatch({ type: "set-running", task: { taskId: activeTask.taskId, conversationId: activeTask.conversationId } });
+    }
+
+    let cancelled = false;
+    const sync = async () => {
+      if (activeTask.status === "pending" && !runningRef.current) {
+        void streamTask(activeTask.taskId, activeTask.conversationId);
+      }
+      void refreshConversationList();
+      if (stateRef.current.currentConversationId !== activeTask.conversationId) return;
+      try {
+        const detail = await api.getConversation(activeTask.conversationId);
+        if (cancelled || stateRef.current.currentConversationId !== activeTask.conversationId) return;
+        dispatch({
+          type: "set-current",
+          id: activeTask.conversationId,
+          messages: messagesToViews(detail.messages),
+          tasks: detail.tasks.map((task) => taskToView(task)),
+          app: detail.conversation.app ?? { manifest: null, previewVersion: 0, previewBundleId: null, currentSnapshotId: null },
+          pendingApprovals: detail.pendingApprovals ?? [],
+        });
+      } catch {
+        // The task keeps running; the next poll retries synchronization.
+      }
+    };
+
+    void sync();
+    const timer = window.setInterval(() => void sync(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeTask?.conversationId, activeTask?.status, activeTask?.taskId, mounted, refreshConversationList, state.phase, state.runningTask, streamTask]);
 
   // popstate: restore the thread on browser forward/back
   useEffect(() => {
@@ -299,7 +367,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     async (content: string): Promise<boolean> => {
       const trimmed = content.trim();
       const conversationId = stateRef.current.currentConversationId;
-      if (!trimmed || !conversationId || runningRef.current) return false;
+      if (!trimmed || !conversationId || runningRef.current || findActiveTask(stateRef.current)) return false;
       const conversation = stateRef.current.conversations.find((c) => c.id === conversationId);
       if (conversation?.status === "archived") {
         dispatch({ type: "set-error", message: "归档对话不能发送消息，请先恢复" });
@@ -336,7 +404,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
 
   const retryTask = useCallback(
     (taskId: string) => {
-      if (runningRef.current) return;
+      if (runningRef.current || findActiveTask(stateRef.current)) return;
       void (async () => {
         try {
           const { task } = await api.retryTask(taskId);
@@ -353,6 +421,31 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     },
     [streamTask]
   );
+
+  const stopTask = useCallback(async () => {
+    const active = findActiveTask(stateRef.current);
+    if (!active) return;
+    abortRef.current?.abort();
+    try {
+      await api.stopTask(active.taskId);
+      const detail = await api.getConversation(active.conversationId);
+      if (stateRef.current.currentConversationId === active.conversationId) {
+        dispatch({
+          type: "set-current",
+          id: active.conversationId,
+          messages: messagesToViews(detail.messages),
+          tasks: detail.tasks.map((task) => taskToView(task)),
+          app: detail.conversation.app ?? { manifest: null, previewVersion: 0, previewBundleId: null, currentSnapshotId: null },
+          pendingApprovals: detail.pendingApprovals ?? [],
+        });
+      }
+      dispatch({ type: "set-running", task: null });
+      runningRef.current = false;
+      void refreshConversationList();
+    } catch (error) {
+      dispatch({ type: "set-error", message: friendlyError(error) });
+    }
+  }, [refreshConversationList]);
 
   const setPreviewDevice = useCallback((device: PreviewDevice) => {
     const prefs = { ...stateRef.current.prefs, previewDevice: device };
@@ -378,7 +471,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<WorkspaceContextValue>(() => {
     const runningTaskView = state.tasks.find((t) => t.status === "running" || t.status === "pending") ?? null;
-    const isRunning = state.runningTask != null || runningTaskView != null;
+    const isRunning = state.runningTask != null || findActiveTask(state) != null;
     const currentRoleId = runningTaskView ? runningRoleOf(runningTaskView) : null;
     const latestFailedTask = state.tasks.find((t) => t.status === "failed") ?? null;
 
@@ -427,13 +520,14 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       deleteConversation,
       submitPrompt,
       retryTask,
+      stopTask,
       setPreviewDevice,
       setPreferences,
       refreshPreview,
       clearError,
       resolveApproval,
     };
-  }, [state, switchConversation, createConversation, renameConversation, setConversationStatus, deleteConversation, submitPrompt, retryTask, setPreviewDevice, setPreferences, refreshPreview, clearError, resolveApproval]);
+  }, [state, switchConversation, createConversation, renameConversation, setConversationStatus, deleteConversation, submitPrompt, retryTask, stopTask, setPreviewDevice, setPreferences, refreshPreview, clearError, resolveApproval]);
 
   if (!mounted) {
     return <div className="flex h-dvh items-center justify-center text-sm text-muted-foreground">正在加载工作台…</div>;

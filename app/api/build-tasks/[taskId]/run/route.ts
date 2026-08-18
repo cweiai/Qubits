@@ -11,7 +11,7 @@ import type { AgentEvent } from "@/lib/contracts/agent-events";
 import { initWorkspace } from "@/lib/workspace/workspace-manager";
 import { createCodeSnapshot, snapshotDirFor } from "@/lib/workspace/snapshot";
 import { legacyManifestFromJson } from "@/lib/workspace/legacy-convert";
-import { composeAbortSignals, registerRun, unregisterRun } from "@/lib/ai/run-registry";
+import { isRunActive, registerRun, terminateRun, unregisterRun } from "@/lib/ai/run-registry";
 import type { PromoteRunInput } from "@/lib/ai/tools/types";
 
 export const runtime = "nodejs";
@@ -90,6 +90,12 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
     }
     if (conversation.status === "archived") {
       return apiErrorResponse(new ApiError("CONVERSATION_ARCHIVED", "归档对话不能执行生成任务", 403), requestId);
+    }
+    if (isRunActive(task.id) || task.status === "running") {
+      return apiErrorResponse(new ApiError("BUILD_IN_PROGRESS", "该任务正在执行", 409), requestId);
+    }
+    if (task.status !== "pending") {
+      return apiErrorResponse(new ApiError("TASK_NOT_RUNNABLE", "该任务当前不能启动", 409), requestId);
     }
 
     const project = repo.getProject(projectId);
@@ -196,6 +202,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
 
     const send = (event: AgentEvent): void => {
       try {
+        if (runHandle?.controller.signal.aborted && event.type !== "error") return;
         const now = Date.now();
         switch (event.type) {
           case "agent_started": {
@@ -345,7 +352,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
       async start(controller) {
         streamController = controller;
         const activeHandle = runHandle!; // registered before the stream starts
-        const signal = composeAbortSignals(request.signal, activeHandle.controller.signal);
+        const signal = activeHandle.controller.signal;
         try {
           // Failures surface via the error event above; the orchestrator's return value is otherwise unused.
           await runMikeOrchestrator({
@@ -376,9 +383,9 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
           repo.updateTask(task.id, {
             status: "failed",
             stage: "failed",
-            errorCode: aborted ? "CLIENT_ABORTED" : "INTERNAL",
+            errorCode: aborted ? "USER_ABORTED" : "INTERNAL",
             errorMessage: aborted
-              ? "请求已取消（页面刷新、断开连接或对话已删除）。工作区与产物已保留；当前成功版本不受影响。"
+              ? "任务已由用户中断。工作区与产物已保留；当前成功版本不受影响。"
               : error instanceof Error ? error.message.slice(0, 240) : "生成失败",
           });
         } finally {
@@ -423,6 +430,58 @@ export async function GET(_request: NextRequest, context: RouteContext): Promise
       return apiErrorResponse(new ApiError("TASK_NOT_FOUND", "构建任务不存在", 404), requestId);
     }
     return Response.json({ ok: true, data: { task: toTaskJson(task) } });
+  } catch (error) {
+    return apiErrorResponse(error, requestId);
+  }
+}
+
+export async function DELETE(request: NextRequest, context: RouteContext): Promise<Response> {
+  const requestId = "req-" + crypto.randomUUID();
+  try {
+    const { taskId } = await context.params;
+    const repo = getRepository();
+    const projectId = resolveProjectId(request, repo);
+    const task = repo.getTask(taskId);
+    if (!task || task.projectId !== projectId) {
+      return apiErrorResponse(new ApiError("TASK_NOT_FOUND", "构建任务不存在", 404), requestId);
+    }
+    if (task.status !== "pending" && task.status !== "running") {
+      return Response.json({ ok: true, data: { stopped: false, task: toTaskJson(task) } });
+    }
+
+    const terminated = await terminateRun(task.id);
+    const latest = repo.getTask(task.id);
+    if (!latest || latest.status === "ready") {
+      return Response.json({ ok: true, data: { stopped: false, task: latest ? toTaskJson(latest) : null } });
+    }
+    if (
+      latest.status === "failed" &&
+      latest.errorCode !== "USER_ABORTED" &&
+      !(terminated && latest.errorCode === "CLIENT_ABORTED")
+    ) {
+      return Response.json({ ok: true, data: { stopped: false, task: toTaskJson(latest) } });
+    }
+
+    const message = "任务已由用户中断。工作区与已生成产物已保留；当前成功版本不受影响。";
+    repo.expirePendingApprovals(task.id);
+    repo.removeTaskErrors(task.id);
+    repo.upsertTaskError({
+      id: "msg-" + crypto.randomUUID(),
+      conversationId: task.conversationId,
+      taskId: task.id,
+      roleId: "team_leader",
+      content: message,
+      errorCode: "USER_ABORTED",
+    });
+    repo.updateTask(task.id, {
+      status: "failed",
+      stage: "failed",
+      errorCode: "USER_ABORTED",
+      errorMessage: message,
+    });
+    repo.touchConversation(task.conversationId, Date.now());
+    const stopped = repo.getTask(task.id)!;
+    return Response.json({ ok: true, data: { stopped: true, task: toTaskJson(stopped) } });
   } catch (error) {
     return apiErrorResponse(error, requestId);
   }

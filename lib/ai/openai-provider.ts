@@ -211,8 +211,8 @@ async function readErrorDetail(response: Response): Promise<string> {
 /** Map an internal provider timeout vs an external client abort to distinct stable errors. */
 function mapAbortError(error: unknown, signal: AbortSignal | undefined, timeoutMs: number): Error {
   if (signal?.aborted) {
-    // Client aborted (page refresh / disconnect): keep the AbortError so the orchestrator
-    // can emit CLIENT_ABORTED (a different, more specific code than a provider timeout).
+    // Explicit task cancellation keeps the AbortError so the orchestrator
+    // can emit USER_ABORTED (a different, more specific code than a provider timeout).
     return error instanceof Error ? error : new Error("请求已取消");
   }
   if (error instanceof Error && error.name === "AbortError") {
@@ -587,7 +587,7 @@ async function attemptChatWithTools(input: GenerateWithToolsInput): Promise<Agen
       ]);
     } catch (error) {
       // Map connection, DNS, and abort failures to stable provider errors.
-      if (input.signal?.aborted) throw error; // user abort: no retry, CLIENT_ABORTED upstream
+      if (input.signal?.aborted) throw error; // user abort: no retry, USER_ABORTED upstream
       if (error instanceof Error && error.name === "AbortError") {
         throw new ProviderError("PROVIDER_TIMEOUT", "模型服务请求超时（" + Math.round(timeoutMs / 1000) + " 秒）。");
       }

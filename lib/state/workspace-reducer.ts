@@ -67,7 +67,6 @@ type WorkspaceAction =
   | { type: "task-event"; taskId: string; event: AgentEvent; now: number }
   | { type: "task-refreshed"; tasks: TaskJson[] }
   | { type: "approvals-refreshed"; approvals: ApprovalJson[] }
-  | { type: "task-error"; taskId: string; message: string; now: number }
   | { type: "approval-resolved"; approvalId: string }
   | { type: "set-running"; task: { taskId: string; conversationId: string } | null }
   | { type: "set-error"; message: string | null }
@@ -493,28 +492,6 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           .filter((approval) => approval.status === "pending" && approval.taskId !== null && approval.toolCallId !== null)
           .map((approval) => ({ approvalId: approval.approvalId, taskId: approval.taskId!, toolCallId: approval.toolCallId!, toolName: approval.toolName, reason: approval.reason })),
       };
-    case "task-error": {
-      const message: ConversationMessage = {
-        id: "live:" + action.taskId + ":neterr",
-        type: "error",
-        runId: action.taskId,
-        roleId: null,
-        text: action.message,
-        artifact: null,
-        status: null,
-        timestamp: action.now,
-      };
-      return {
-        ...state,
-        messages: [...state.messages, message],
-        tasks: updateTaskInList(state.tasks, action.taskId, (t) => ({
-          ...t,
-          status: "failed",
-          stage: "failed",
-          error: { roleId: "engineer", message: action.message },
-        })),
-      };
-    }
     case "approval-resolved":
       return { ...state, pendingApprovals: state.pendingApprovals.filter((approval) => approval.approvalId !== action.approvalId) };
     case "set-running":

@@ -851,7 +851,7 @@ export class AppRepository {
   markStaleRunningTasks(projectId: string, staleBefore: number): number {
     const result = this.db
       .prepare(
-        "UPDATE build_tasks SET status = 'failed', stage = 'failed', error_code = 'STALE', error_message = '会话中断（页面刷新或连接断开），可重试。', updated_at = ? WHERE project_id = ? AND status = 'running' AND updated_at < ?"
+        "UPDATE build_tasks SET status = 'failed', stage = 'failed', error_code = 'STALE', error_message = '任务执行进程已停止，可重试。', updated_at = ? WHERE project_id = ? AND status = 'running' AND updated_at < ?"
       )
       .run(Date.now(), projectId, staleBefore);
     this.db.prepare("UPDATE approvals SET status = 'expired', resolved_at = ? WHERE project_id = ? AND status = 'pending'").run(Date.now(), projectId);

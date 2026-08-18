@@ -6,8 +6,8 @@ import type { AgentEvent } from "@/lib/contracts/agent-events";
 import type { AIProvider } from "@/lib/ai/provider";
 
 /**
- * Provider timeout vs client abort must produce DIFFERENT stable error codes:
- * PROVIDER_TIMEOUT comes from the provider itself; CLIENT_ABORTED from the client
+ * Provider timeout vs user abort must produce DIFFERENT stable error codes:
+ * PROVIDER_TIMEOUT comes from the provider itself; USER_ABORTED from the task
  * signal. Neither may surface as a generic "This operation was aborted".
  */
 
@@ -15,7 +15,7 @@ function abortableController(): AbortController {
   return new AbortController();
 }
 
-describe("Provider 超时与客户端取消", () => {
+describe("Provider 超时与用户取消", () => {
   it("provider 超时 → PROVIDER_TIMEOUT（不伪装成客户端取消）", async () => {
     const events: AgentEvent[] = [];
     const provider: AIProvider = {
@@ -42,7 +42,7 @@ describe("Provider 超时与客户端取消", () => {
     expect(errorEvent?.message).not.toMatch(/abort/i);
   });
 
-  it("客户端取消 → CLIENT_ABORTED（区别于 PROVIDER_TIMEOUT）", async () => {
+  it("用户取消 → USER_ABORTED（区别于 PROVIDER_TIMEOUT）", async () => {
     const controller = abortableController();
     const events: AgentEvent[] = [];
     const provider: AIProvider = {
@@ -68,8 +68,8 @@ describe("Provider 超时与客户端取消", () => {
     });
     expect(result.status).toBe("failed");
     const errorEvent = events.find((e) => e.type === "error") as { code?: string; message: string } | undefined;
-    expect(errorEvent?.code).toBe("CLIENT_ABORTED");
-    expect(errorEvent?.message).toContain("CLIENT_ABORTED");
+    expect(errorEvent?.code).toBe("USER_ABORTED");
+    expect(errorEvent?.message).toContain("USER_ABORTED");
   });
 
   it("取消后的工作区文件保留（重试不会删除已有文件）", async () => {

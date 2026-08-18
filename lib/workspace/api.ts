@@ -213,6 +213,8 @@ export const api = {
     request<{ task: TaskJson | null }>(`/api/build-tasks/${taskId}`, { method: "POST" }),
   getTask: (taskId: string) =>
     request<{ task: TaskJson }>(`/api/build-tasks/${taskId}`),
+  stopTask: (taskId: string) =>
+    request<{ stopped: boolean; task: TaskJson | null }>(`/api/build-tasks/${taskId}/run`, { method: "DELETE" }),
   getCodeFiles: (conversationId: string) =>
     request<{ version: number | null; files: CodeFile[] }>(
       `/api/projects/current/code?conversationId=${encodeURIComponent(conversationId)}`

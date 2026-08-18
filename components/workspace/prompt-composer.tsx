@@ -1,15 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Send } from "lucide-react";
+import { Loader2, Send, Square } from "lucide-react";
 import { useWorkspace } from "@/lib/state/workspace-provider";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
 export function PromptComposer() {
-  const { isRunning, submitPrompt, state } = useWorkspace();
+  const { isRunning, submitPrompt, stopTask, state } = useWorkspace();
   const [value, setValue] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const busy = isRunning || submitting;
   const canSubmit = value.trim().length > 0 && !busy;
 
@@ -42,16 +43,34 @@ export function PromptComposer() {
             }
           }}
         />
-        <Button
-          data-testid="prompt-send"
-          onClick={() => void submit()}
-          disabled={!canSubmit}
-          size="icon"
-          className="h-[52px] w-10 shrink-0"
-          aria-label="发送需求"
-        >
-          {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-        </Button>
+        {isRunning ? (
+          <Button
+            data-testid="prompt-stop"
+            onClick={() => {
+              setStopping(true);
+              void stopTask().finally(() => setStopping(false));
+            }}
+            disabled={stopping}
+            size="icon"
+            variant="destructive"
+            className="h-[52px] w-10 shrink-0"
+            aria-label="中断任务"
+            title="中断任务"
+          >
+            {stopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4 fill-current" />}
+          </Button>
+        ) : (
+          <Button
+            data-testid="prompt-send"
+            onClick={() => void submit()}
+            disabled={!canSubmit}
+            size="icon"
+            className="h-[52px] w-10 shrink-0"
+            aria-label="发送需求"
+          >
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          </Button>
+        )}
       </div>
       <p className="mt-1.5 text-[11px] text-muted-foreground">Enter 发送 · Shift+Enter 换行。</p>
     </div>

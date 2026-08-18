@@ -224,7 +224,7 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
       }).id;
       return { status: "completed", artifactId, summary: result.summary, issues: result.issues };
     } catch (error) {
-      // Aborts propagate to Mike's loop and the orchestrator maps them to CLIENT_ABORTED.
+      // Aborts propagate to Mike's loop and are persisted as explicit user cancellation.
       if (input.signal?.aborted || isAbortLike(error)) throw error;
       const { code, message } = friendlyMessage(error);
       return { status: "failed", artifactId: null, summary: message.slice(0, 300), issues: [message.slice(0, 300)], errorCode: code };
@@ -275,8 +275,8 @@ export async function runMikeOrchestrator(input: MikeRunInput): Promise<MikeRunR
     return { status: "completed", summary: result.summary, suggestions: [] };
   } catch (error) {
     if (input.signal?.aborted || isAbortLike(error)) {
-      const message = "[CLIENT_ABORTED] 请求已取消（页面刷新或断开连接）。工作区与产物已保留，可重试；当前成功版本不受影响。";
-      input.emit({ type: "error", roleId: "team_leader", message: message.slice(0, 400), code: "CLIENT_ABORTED" });
+      const message = "[USER_ABORTED] 任务已由用户中断。工作区与产物已保留，可重试；当前成功版本不受影响。";
+      input.emit({ type: "error", roleId: "team_leader", message: message.slice(0, 400), code: "USER_ABORTED" });
       return { status: "failed", summary: message, suggestions: [] };
     }
     // Stable provider/tool-loop codes survive to the API route and the database;

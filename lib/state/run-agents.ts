@@ -7,8 +7,7 @@ import { agentEventSchema, type AgentEvent } from "@/lib/contracts/agent-events"
 export async function streamTaskRun(
   taskId: string,
   signal: AbortSignal,
-  onEvent: (event: AgentEvent) => void,
-  onFatal: (message: string) => void
+  onEvent: (event: AgentEvent) => void
 ): Promise<void> {
   let response: Response;
   try {
@@ -19,11 +18,9 @@ export async function streamTaskRun(
       signal,
     });
   } catch {
-    if (!signal.aborted) onFatal("无法连接服务：网络错误或服务不可用，请重试。");
     return;
   }
   if (!response.ok || !response.body) {
-    onFatal("请求失败（HTTP " + response.status + "），请重试。");
     return;
   }
   const reader = response.body.getReader();
@@ -56,6 +53,6 @@ export async function streamTaskRun(
       }
     }
   } catch {
-    if (!signal.aborted) onFatal("连接中断：生成过程被中断，任务会在稍后标记为可重试。");
+    return;
   }
 }
